@@ -23,6 +23,7 @@ RUN npm run build
 # --- Backend Build Stage ---
 FROM rust:1-slim-bookworm AS backend-builder
 ARG USE_MIRROR=auto
+ARG RUN_HISTORY_TESTS=false
 
 # Conditionally use Aliyun mirror for APT
 RUN if [ "$USE_MIRROR" = "true" ] || ( [ "$USE_MIRROR" = "auto" ] && ! timeout 3 bash -c "</dev/tcp/www.google.com/80" 2>/dev/null ); then \
@@ -83,6 +84,9 @@ WORKDIR /app/src-tauri
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/src-tauri/target \
+    if [ "$RUN_HISTORY_TESTS" = "true" ]; then \
+        cargo test --release --lib proxy::mappers::openai::request::tests -- --test-threads=1; \
+    fi && \
     cargo build --release --bin antigravity-tools && \
     cp target/release/antigravity-tools /tmp/antigravity-tools
 
