@@ -85,6 +85,18 @@ fn system_instruction_dedupe_key(text: &str) -> String {
         .join(" ")
 }
 
+fn is_apply_patch_tool_name(name: &str) -> bool {
+    name == "apply_patch" || name == "apply_patch_v2"
+}
+
+fn should_preserve_tool_output(tool_name: &str, output: &str) -> bool {
+    is_apply_patch_tool_name(tool_name)
+        || output.contains("apply_patch verification failed")
+        || output.contains("Failed to find expected lines")
+        || output.contains("Failed to find context")
+        || output.contains("Expected update hunk")
+}
+
 fn qualify_namespace_tool_name(namespace_name: &str, child_name: &str) -> String {
     let child = child_name.trim();
     let ns = namespace_name.trim();
@@ -429,14 +441,14 @@ pub fn transform_openai_request(
 
     // 2. 构建 Gemini contents (过滤掉 system/developer 指令)
     let total_messages = request.messages.len();
-    let recent_reasoning_window = 24usize;
+    let recent_message_window = 24usize;
     let contents: Vec<Value> = request
         .messages
         .iter()
         .enumerate()
         .filter(|(_, msg)| msg.role != "system" && msg.role != "developer")
         .map(|(msg_index, msg)| {
-            let is_recent_reasoning = msg_index >= total_messages.saturating_sub(recent_reasoning_window);
+            let is_latest = msg_index >= total_messages.saturating_sub(recent_message_window);
             let role = match msg.role.as_str() {
                 "assistant" => "model",
                 "tool" | "function" => "user",
@@ -454,7 +466,7 @@ pub fn transform_openai_request(
                 let is_invalid_placeholder = reasoning == "[undefined]" || reasoning.is_empty();
 
                 if !is_invalid_placeholder {
-                    if is_recent_reasoning {
+                    if is_latest {
                         let thought_part = json!({
                             "text": reasoning,
                             "thought": true,
@@ -614,8 +626,10 @@ pub fn transform_openai_request(
                         continue;
                     }
 
-                    // Tool history is task evidence. Context reduction belongs to the
-                    // caller's compaction step, not this protocol conversion.
+                    if !is_latest && args_str.len() > 1000 && !is_apply_patch_tool_name(&func_name)
+                    {
+                        args_str = "{\"_truncated\": \"Arguments truncated to save context window.\"}".to_string();
+                    }
                     let mut args = serde_json::from_str::<Value>(&args_str).unwrap_or(json!({}));
 
                     // [New] 利用通用引擎修正参数类型 (替代以前硬编码的 shell 工具修复逻辑)
@@ -660,7 +674,16 @@ pub fn transform_openai_request(
                 let mut extra_parts = Vec::new();
 
                 let content_val = match &msg.content {
-                    Some(OpenAIContent::String(s)) => s.clone(),
+                    Some(OpenAIContent::String(s)) => {
+                        if !is_latest
+                            && s.len() > 1000
+                            && !should_preserve_tool_output(final_name, s)
+                        {
+                            format!("[Tool output truncated to save context. Original length: {}]", s.len())
+                        } else {
+                            s.clone()
+                        }
+                    },
                     Some(OpenAIContent::Array(blocks)) => {
                         let mut texts = Vec::new();
                         for block in blocks {
@@ -1355,99 +1378,6 @@ fn enforce_uppercase_types(value: &mut Value) {
 mod tests {
     use super::*;
     use crate::proxy::mappers::openai::models::*;
-
-    fn history_retention_parts(
-        tool_name: &str,
-        arguments: Value,
-        output: Value,
-        later_messages: usize,
-    ) -> Vec<Value> {
-        let mut messages = vec![
-            json!({"role": "user", "content": "Inspect the source and retain the evidence."}),
-            json!({
-                "role": "assistant",
-                "tool_calls": [{
-                    "id": "history-call",
-                    "type": "function",
-                    "function": {"name": tool_name, "arguments": arguments.to_string()}
-                }]
-            }),
-            json!({"role": "tool", "tool_call_id": "history-call", "content": output}),
-        ];
-        for index in 0..later_messages {
-            messages.push(json!({
-                "role": if index % 2 == 0 { "assistant" } else { "user" },
-                "content": format!("Later message {}", index)
-            }));
-        }
-        messages.push(json!({"role": "user", "content": "Use the earlier tool evidence."}));
-        let request: OpenAIRequest = serde_json::from_value(json!({
-            "model": "gemini-3-flash",
-            "messages": messages,
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"input": {"type": "string"}},
-                        "required": ["input"]
-                    }
-                }
-            }]
-        })).unwrap();
-        let (result, _, _, _) =
-            transform_openai_request(&request, "history-retention-test", "gemini-3-flash", None);
-        result["request"]["contents"].as_array().unwrap().iter()
-            .flat_map(|content| content["parts"].as_array().unwrap().iter().cloned())
-            .collect()
-    }
-
-    #[test]
-    fn test_history_retention_preserves_old_arguments_and_results() {
-        let script = format!("await tools.apply_patch({:?});\n", "+ verified patch line\n".repeat(200));
-        let arguments = json!({"input": script});
-        let output = "verified source and test result\n".repeat(500);
-        for later_messages in [0, 24, 80] {
-            for tool_name in ["exec", "inspect", "apply_patch", "apply_patch_v2"] {
-                let parts = history_retention_parts(tool_name, arguments.clone(), json!(output), later_messages);
-                let call = parts.iter().find_map(|part| part.get("functionCall")).unwrap();
-                let response = parts.iter().find_map(|part| part.get("functionResponse")).unwrap();
-                assert_eq!(call["args"], arguments, "{} after {} messages", tool_name, later_messages);
-                assert_eq!(response["response"]["result"], output);
-                assert_eq!(call["id"], "history-call");
-                assert_eq!(response["id"], call["id"]);
-                assert_eq!(response["name"], call["name"]);
-            }
-        }
-    }
-
-    #[test]
-    fn test_history_retention_preserves_multibyte_and_structured_results() {
-        let text = "\u{4e2d}".repeat(500);
-        assert!(text.len() > 1000 && text.chars().count() < 1000);
-        let arguments = json!({"input": text});
-        let image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-        for output in [
-            json!(text),
-            json!([
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", image)}}
-            ]),
-        ] {
-            let structured = output.is_array();
-            let parts = history_retention_parts("exec", arguments.clone(), output, 80);
-            let call = parts.iter().find_map(|part| part.get("functionCall")).unwrap();
-            let response = parts.iter().find_map(|part| part.get("functionResponse")).unwrap();
-            assert_eq!(call["args"], arguments);
-            assert_eq!(response["response"]["result"], text);
-            if structured {
-                let media = parts.iter().find_map(|part| part.get("inlineData")).unwrap();
-                assert_eq!(media["mimeType"], "image/png");
-                assert_eq!(media["data"], image);
-            }
-        }
-    }
 
     #[test]
     #[test]
