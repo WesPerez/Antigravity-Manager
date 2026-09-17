@@ -1,6 +1,8 @@
 mod commands;
 pub mod constants;
 pub mod error;
+#[cfg(target_os = "linux")]
+mod linux_graphics;
 mod models;
 mod modules;
 mod proxy; // Proxy service module
@@ -82,23 +84,57 @@ fn credential_state(value: &str) -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_gdk_backend() {
-    if std::env::var("GDK_BACKEND").is_ok() {
-        return;
-    }
+fn nvidia_proprietary_loaded() -> bool {
+    std::path::Path::new("/dev/nvidia0").exists()
+        || std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_graphics() {
+    use linux_graphics::{
+        desktop_is_wlroots_family, should_disable_webkit_dmabuf, should_force_x11_backend,
+    };
 
     let is_wayland = is_wayland_session();
     let has_x11_display = std::env::var("DISPLAY")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_else(|_| std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default());
     let force_wayland = env_flag_enabled("ANTIGRAVITY_FORCE_WAYLAND");
     let force_x11 = env_flag_enabled("ANTIGRAVITY_FORCE_X11");
+    let gdk_already_set = std::env::var("GDK_BACKEND").is_ok();
 
-    if force_x11 || (is_wayland && has_x11_display && !force_wayland) {
-        // Force X11 backend under Wayland sessions to avoid a GTK Wayland shm crash.
+    if should_force_x11_backend(
+        gdk_already_set,
+        force_x11,
+        force_wayland,
+        is_wayland,
+        has_x11_display,
+        &desktop,
+    ) {
+        // Force X11 backend under GNOME/KDE Wayland to avoid a GTK shm crash.
         std::env::set_var("GDK_BACKEND", "x11");
         warn!(
             "Forcing GDK_BACKEND=x11 for stability on Wayland. Set ANTIGRAVITY_FORCE_WAYLAND=1 to keep Wayland backend."
+        );
+    } else if is_wayland && !gdk_already_set && desktop_is_wlroots_family(&desktop) {
+        info!(
+            "Keeping native Wayland GDK backend on {} (Xwayland DISPLAY is not a reason to force X11).",
+            desktop
+        );
+    }
+
+    let webkit_already_set = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_ok();
+    if should_disable_webkit_dmabuf(
+        webkit_already_set,
+        is_wayland,
+        nvidia_proprietary_loaded(),
+        &desktop,
+    ) {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        info!(
+            "WEBKIT_DISABLE_DMABUF_RENDERER=1 (WebKit DMA-BUF workaround on this Wayland setup). Set it yourself to override."
         );
     }
 }
@@ -211,7 +247,7 @@ pub fn run() {
     logger::init_logger();
 
     #[cfg(target_os = "linux")]
-    configure_linux_gdk_backend();
+    configure_linux_graphics();
 
     // Initialize token stats database
     if let Err(e) = modules::token_stats::init_db() {
@@ -580,6 +616,8 @@ pub fn run() {
             commands::get_antigravity_cache_paths,
             commands::open_data_folder,
             commands::get_data_dir_path,
+            commands::set_data_dir,
+            commands::migrate_data_dir,
             commands::show_main_window,
             commands::set_window_theme,
             commands::get_antigravity_path,
@@ -622,7 +660,6 @@ pub fn run() {
             commands::proxy::get_preferred_account,
             commands::proxy::clear_proxy_rate_limit,
             commands::proxy::clear_all_proxy_rate_limits,
-            commands::proxy::check_proxy_health,
             // Proxy Pool Binding commands
             commands::proxy_pool::bind_account_proxy,
             commands::proxy_pool::unbind_account_proxy,
@@ -656,6 +693,7 @@ pub fn run() {
             proxy::opencode_sync::get_opencode_sync_status,
             proxy::opencode_sync::get_canonical_families,
             proxy::opencode_sync::execute_opencode_sync,
+            proxy::opencode_sync::execute_opencode_openai_sync,
             proxy::opencode_sync::execute_opencode_restore,
             proxy::opencode_sync::get_opencode_config_content,
             proxy::opencode_sync::execute_opencode_clear,
@@ -708,33 +746,35 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             match event {
-                // Handle app exit - cleanup background tasks
+                // Handle app exit - cleanup background tasks and release ports
                 tauri::RunEvent::Exit => {
-                    tracing::info!("Application exiting, cleaning up background tasks...");
+                    tracing::info!("Application exiting, cleaning up background tasks and releasing ports...");
                     if let Some(state) =
                         app_handle.try_state::<crate::commands::proxy::ProxyServiceState>()
                     {
+                        let cf_state = app_handle.try_state::<crate::commands::cloudflared::CloudflaredState>();
                         tauri::async_runtime::block_on(async {
-                            // Use timeout-based read() instead of try_read() to handle lock contention
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(3),
-                                state.instance.read(),
-                            )
-                            .await
-                            {
-                                Ok(guard) => {
-                                    if let Some(instance) = guard.as_ref() {
-                                        // Use graceful_shutdown with 2s timeout for task cleanup
-                                        instance
-                                            .token_manager
-                                            .graceful_shutdown(std::time::Duration::from_secs(2))
-                                            .await;
-                                    }
+                            // 1. 停止 cloudflared 隧道
+                            if let Some(cf) = cf_state {
+                                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), cf.stop()).await;
+                            }
+
+                            // 2. 停止 Admin Server（释放 TCP 监听器和 Socket）
+                            if let Ok(mut lock) = tokio::time::timeout(std::time::Duration::from_millis(1000), state.admin_server.write()).await {
+                                if let Some(admin) = lock.take() {
+                                    admin.stop().await;
                                 }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        "Lock acquisition timed out after 3s, forcing exit"
-                                    );
+                            }
+
+                            // 3. 停止业务代理实例及后台任务
+                            if let Ok(mut lock) = tokio::time::timeout(std::time::Duration::from_millis(1000), state.instance.write()).await {
+                                if let Some(instance) = lock.take() {
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_millis(500),
+                                        instance.token_manager.graceful_shutdown(std::time::Duration::from_millis(400)),
+                                    ).await;
+                                    instance.axum_server.set_running(false).await;
+                                    instance.axum_server.stop();
                                 }
                             }
                         });

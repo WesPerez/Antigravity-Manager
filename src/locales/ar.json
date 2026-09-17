@@ -276,7 +276,10 @@
       "email": "البريد الإلكتروني",
       "quota": "حصة النموذج",
       "last_used": "آخر استخدام",
-      "actions": "إجراءات"
+      "actions": "إجراءات",
+      "weekly_quota": "الحصة الأسبوعية",
+      "sort_by_reset_time": "انقر للترتيب حسب وقت إعادة تعيين الحصة",
+      "sort_by_last_used": "انقر للترتيب حسب وقت آخر استخدام"
     },
     "drag_to_reorder": "اسحب لإعادة الترتيب",
     "empty": {
@@ -306,7 +309,8 @@
       "batch_warmup_title": "تنشيط يدوي جماعي",
       "batch_warmup_msg": "هل أنت متأكد من إطلاق التنشيط لـ {{count}} حساب المحدد فورًا؟"
     },
-    "switch_to_agy": "Switch to Antigravity CLI (agy)"
+    "switch_to_agy": "Switch to Antigravity CLI (agy)",
+    "drag_disabled_during_sort": "فرز الأعمدة مفعل؛ تم إيقاف السحب مؤقتًا"
   },
   "settings": {
     "save": "حفظ الإعدادات",
@@ -1221,7 +1225,8 @@
       "quickConfig": "One-Click Local Dev Setup",
       "syncDesc": "Sync to official standard configuration",
       "codexTooltip": "Sync API Key & BaseURL to Antigravity Codex",
-      "claudeTooltip": "Sync API Key & BaseURL to Claude Code"
+      "claudeTooltip": "Sync API Key & BaseURL to Claude Code",
+      "opencodeTooltip": "Sync API Key, BaseURL and models to OpenCode"
     },
     "models": {
       "title": "Available Models",

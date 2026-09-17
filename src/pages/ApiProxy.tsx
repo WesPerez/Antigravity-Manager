@@ -458,6 +458,17 @@ export default function ApiProxy() {
         }
     };
 
+    const handleSaveProxySettings = async () => {
+        if (!appConfig) return;
+        try {
+            await invoke('save_config', { config: appConfig });
+            showToast(t('common.saved'), 'success');
+        } catch (error) {
+            console.error('保存配置失败:', error);
+            showToast(`${t('common.error')}: ${error}`, 'error');
+        }
+    };
+
     // 专门处理模型映射的热更新 (全量)
     const handleMappingUpdate = async (type: 'custom', key: string, value: string) => {
         if (!appConfig) return;
@@ -1125,6 +1136,14 @@ print(response.choices[0].message.content)`;
                             {/* 控制按钮 */}
                             <div className="flex items-center gap-2">
                                 <button
+                                    onClick={handleSaveProxySettings}
+                                    disabled={!appConfig}
+                                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900/40 ${!appConfig ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                >
+                                    <Save size={14} />
+                                    {t('settings.save')}
+                                </button>
+                                <button
                                     onClick={handleToggle}
                                     disabled={loading || !appConfig}
                                     className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 ${status.running
@@ -1212,6 +1231,21 @@ print(response.choices[0].message.content)`;
                                 </div>
                             </div>
 
+
+                            <div className="border-t border-gray-200 dark:border-base-300 pt-3 mt-3">
+                                <div className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-2">{t('proxy.config.log_retention_title')}</div>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    {([['max_body_age_hours', 'log_retention_body_hours'], ['max_age_days', 'log_retention_age_days'], ['max_rows', 'log_retention_rows']] as const).map(([field, label]) => (
+                                        <label key={field} className="text-xs text-gray-600 dark:text-gray-400">
+                                            {t(`proxy.config.${label}`)}
+                                            <input type="number" min={1}
+                                                value={appConfig.proxy.log_retention?.[field] ?? (field === 'max_body_age_hours' ? 24 : field === 'max_age_days' ? 30 : 100000)}
+                                                onChange={(e) => updateProxyConfig({ log_retention: { ...(appConfig.proxy.log_retention || { max_body_age_hours: 24, max_age_days: 30, max_rows: 100000 }), [field]: Math.max(1, Number(e.target.value)) } })}
+                                                className="w-full mt-1 px-2.5 py-1.5 border border-gray-300 dark:border-base-200 rounded-lg bg-white dark:bg-base-200 text-xs" />
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
 
                             {/* 局域网访问 & 访问授权 - 合并到同一行 */}
                             <div className="border-t border-gray-200 dark:border-base-300 pt-3 mt-3">
@@ -2040,6 +2074,60 @@ print(response.choices[0].message.content)`;
                                             </div>
                                         </>
                                     )}
+
+                                    <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-base-200 rounded-xl border border-gray-100 dark:border-base-300">
+                                        <div className="space-y-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm font-bold text-gray-900 dark:text-base-content">
+                                                    {t('proxy.config.experimental.payload_storage_mode_label', { defaultValue: '监控报文存储模式' })}
+                                                </span>
+                                                <HelpTooltip text={t('proxy.config.experimental.payload_storage_mode_tooltip', { defaultValue: '简要模式只把思考块、用量、会话标识和精简对话写入 SQLite；完整模式保存原文。请求头中的 API Key 始终脱敏，会话 ID 会原样保留便于运维对比。' })} />
+                                            </div>
+                                            <p className="text-[10px] text-gray-500 dark:text-gray-400 max-w-lg">
+                                                {t('proxy.config.experimental.payload_storage_mode_desc', { defaultValue: '默认简要存储，避免工具参数和图片把日志库撑爆。需要对照原文时再切到完整模式。' })}
+                                            </p>
+                                        </div>
+                                        <select
+                                            className="select select-sm select-bordered w-48 text-xs font-normal focus:outline-none dark:bg-base-300 dark:text-base-content border-gray-200 dark:border-base-400"
+                                            value={appConfig.proxy.experimental?.payload_storage_mode || 'simple'}
+                                            onChange={(e) => updateExperimentalConfig({ payload_storage_mode: e.target.value as 'simple' | 'full' })}
+                                        >
+                                            <option value="simple" className="text-xs dark:bg-base-300">{t('proxy.config.experimental.payload_mode_simple', { defaultValue: '简要 (默认)' })}</option>
+                                            <option value="full" className="text-xs dark:bg-base-300">{t('proxy.config.experimental.payload_mode_full', { defaultValue: '完整原文' })}</option>
+                                        </select>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div className="flex flex-col gap-1 p-4 bg-gray-50 dark:bg-base-200 rounded-xl border border-gray-100 dark:border-base-300">
+                                            <span className="text-sm font-bold text-gray-900 dark:text-base-content">
+                                                {t('proxy.config.experimental.log_retention_days_label', { defaultValue: '请求日志保留天数' })}
+                                            </span>
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                max={3650}
+                                                className="input input-sm input-bordered w-full text-xs"
+                                                value={appConfig.proxy.experimental?.log_retention_days ?? 30}
+                                                onChange={(e) => updateExperimentalConfig({ log_retention_days: Math.max(1, parseInt(e.target.value) || 30) })}
+                                            />
+                                        </div>
+                                        <div className="flex flex-col gap-1 p-4 bg-gray-50 dark:bg-base-200 rounded-xl border border-gray-100 dark:border-base-300">
+                                            <span className="text-sm font-bold text-gray-900 dark:text-base-content">
+                                                {t('proxy.config.experimental.thinking_retention_days_label', { defaultValue: '思考块保留天数（滑动窗口）' })}
+                                            </span>
+                                            <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                                                {t('proxy.config.experimental.thinking_retention_days_desc', { defaultValue: '默认 15 天滑动窗口。只要客户端 sessionID 仍在活跃窗口内，每次请求都会自动刷新过期时间；超过窗口没有请求后才会清理。' })}
+                                            </p>
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                max={3650}
+                                                className="input input-sm input-bordered w-full text-xs"
+                                                value={appConfig.proxy.experimental?.thinking_retention_days ?? 15}
+                                                onChange={(e) => updateExperimentalConfig({ thinking_retention_days: Math.max(1, parseInt(e.target.value) || 15) })}
+                                            />
+                                        </div>
+                                    </div>
                                 </div>
                             </CollapsibleCard>
 
