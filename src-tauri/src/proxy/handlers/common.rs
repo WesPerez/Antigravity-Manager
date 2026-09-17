@@ -105,6 +105,17 @@ pub fn determine_retry_strategy(
     retried_without_thinking: bool,
 ) -> RetryStrategy {
     if status_code == 429 {
+        let lower = error_text.to_lowercase();
+        let is_hard_quota_exhausted = lower.contains("resource_exhausted")
+            || lower.contains("quota_exhausted")
+            || lower.contains("exceeded your current quota")
+            || lower.contains("insufficient_quota");
+
+        // [FIX] 硬配额耗尽必须立即轮换账号，绝不走 Grace Retry
+        if is_hard_quota_exhausted {
+            return RetryStrategy::FixedDelay(Duration::from_millis(50));
+        }
+
         return match crate::proxy::upstream::retry::parse_legacy_retry_delay(error_text) {
             Some(delay_ms) if delay_ms > 0 && delay_ms <= 2000 => {
                 let actual_delay = delay_ms.saturating_add(100);
@@ -156,6 +167,16 @@ fn determine_retry_strategy_inner(
 
         // 429 限流错误
         429 => {
+            let is_hard_quota_exhausted = lower.contains("resource_exhausted")
+                || lower.contains("quota_exhausted")
+                || lower.contains("exceeded your current quota")
+                || lower.contains("insufficient_quota");
+
+            // [FIX] 硬配额耗尽必须立即轮换账号，绝不走 Grace Retry
+            if is_hard_quota_exhausted {
+                return RetryStrategy::FixedDelay(Duration::from_millis(50));
+            }
+
             // 优先使用服务端返回的 Retry-After / quotaResetDelay
             if let Some(parsed_delay) = crate::proxy::upstream::retry::parse_retry_delay_with_source(
                 error_text,
@@ -225,16 +246,13 @@ mod tests {
             let mut retry_same_account = false;
             let mut sends = Vec::new();
 
-            while let Some(attempt) = next_rotation_attempt(
-                &mut used_attempts,
-                account_count,
-                retry_same_account,
-            ) {
+            while let Some(attempt) =
+                next_rotation_attempt(&mut used_attempts, account_count, retry_same_account)
+            {
                 retry_same_account = false;
                 sends.push(attempt);
                 let account_id = format!("account-{}", attempt);
-                let strategy =
-                    state.determine_strategy(&account_id, 429, body, None, false);
+                let strategy = state.determine_strategy(&account_id, 429, body, None, false);
                 if matches!(strategy, RetryStrategy::GraceRetry(_)) {
                     assert!(!should_rotate_account(429, Some(&strategy)));
                     retry_same_account = true;
@@ -400,4 +418,101 @@ pub async fn handle_detect_model(
     }
 
     Json(response).into_response()
+}
+
+/// [Issue #3414] 从形如 "All accounts limited. Wait 29s." 或其他明确冷却提示中解析等待秒数
+pub fn extract_retry_after_seconds(error_text: &str) -> Option<u64> {
+    if let Some(pos) = error_text.find("Wait ") {
+        let rest = &error_text[pos + 5..];
+        if let Some(s_pos) = rest.find('s') {
+            if let Ok(sec) = rest[..s_pos].trim().parse::<u64>() {
+                if sec > 0 {
+                    return Some(sec);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// [Issue #3414] 统一构造带有 X-Mapped-Model、可选 X-Account-Email 以及 Retry-After 的 HeaderMap
+pub fn build_token_error_headers<'a>(
+    mapped_model: Option<&'a str>,
+    account_email: Option<&'a str>,
+    error_text: &str,
+) -> axum::http::HeaderMap {
+    use axum::http::header::{HeaderName, HeaderValue};
+    let mut headers = axum::http::HeaderMap::new();
+
+    if let Some(model) = mapped_model {
+        if let Ok(val) = HeaderValue::from_str(model) {
+            headers.insert(HeaderName::from_static("x-mapped-model"), val);
+        }
+    }
+    if let Some(email) = account_email {
+        if let Ok(val) = HeaderValue::from_str(email) {
+            headers.insert(HeaderName::from_static("x-account-email"), val);
+        }
+    }
+    if let Some(sec) = extract_retry_after_seconds(error_text) {
+        if let Ok(val) = HeaderValue::from_str(&sec.to_string()) {
+            headers.insert(axum::http::header::RETRY_AFTER, val);
+        }
+    }
+    headers
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_retry_after_seconds() {
+        assert_eq!(
+            extract_retry_after_seconds("All accounts limited. Wait 29s."),
+            Some(29)
+        );
+        assert_eq!(
+            extract_retry_after_seconds("Token error: All accounts limited. Wait 5s."),
+            Some(5)
+        );
+        assert_eq!(extract_retry_after_seconds("Token pool is empty"), None);
+        assert_eq!(
+            extract_retry_after_seconds("All accounts failed or unhealthy."),
+            None
+        );
+    }
+
+    #[test]
+    fn test_build_token_error_headers() {
+        let headers = build_token_error_headers(
+            Some("gemini-2.5-pro"),
+            Some("test@example.com"),
+            "All accounts limited. Wait 45s.",
+        );
+        assert_eq!(
+            headers.get("x-mapped-model").unwrap().to_str().unwrap(),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            headers.get("x-account-email").unwrap().to_str().unwrap(),
+            "test@example.com"
+        );
+        assert_eq!(headers.get("retry-after").unwrap().to_str().unwrap(), "45");
+
+        let headers_no_wait = build_token_error_headers(
+            Some("gemini-2.5-pro"),
+            None,
+            "All accounts failed or unhealthy.",
+        );
+        assert!(headers_no_wait.get("retry-after").is_none());
+        assert_eq!(
+            headers_no_wait
+                .get("x-mapped-model")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "gemini-2.5-pro"
+        );
+    }
 }

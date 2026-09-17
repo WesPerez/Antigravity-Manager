@@ -274,7 +274,10 @@
       "email": "E-mel",
       "quota": "Kuota Model",
       "last_used": "Terakhir Digunakan",
-      "actions": "Tindakan"
+      "actions": "Tindakan",
+      "weekly_quota": "Kuota Mingguan",
+      "sort_by_reset_time": "Klik untuk susun mengikut masa tetapan semula kuota",
+      "sort_by_last_used": "Klik untuk susun mengikut masa penggunaan terakhir"
     },
     "drag_to_reorder": "Seret untuk menyusun semula",
     "empty": {
@@ -304,7 +307,8 @@
       "batch_warmup_title": "Pemanasan Manual Kelompok",
       "batch_warmup_msg": "Adakah anda pasti mahu mencetuskan pemanasan untuk {{count}} akaun yang dipilih dengan segera?"
     },
-    "switch_to_agy": "Switch to Antigravity CLI (agy)"
+    "switch_to_agy": "Switch to Antigravity CLI (agy)",
+    "drag_disabled_during_sort": "Isihan lajur aktif; seret untuk susun dijeda"
   },
   "settings": {
     "save": "Simpan Tetapan",
@@ -1119,7 +1123,8 @@
       "quickConfig": "One-Click Local Dev Setup",
       "syncDesc": "Sync to official standard configuration",
       "codexTooltip": "Sync API Key & BaseURL to Antigravity Codex",
-      "claudeTooltip": "Sync API Key & BaseURL to Claude Code"
+      "claudeTooltip": "Sync API Key & BaseURL to Claude Code",
+      "opencodeTooltip": "Sync API Key, BaseURL and models to OpenCode"
     },
     "models": {
       "title": "Available Models",

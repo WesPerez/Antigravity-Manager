@@ -70,6 +70,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   // OpenCode Sync
   'get_opencode_sync_status': { url: '/api/proxy/opencode/status', method: 'POST' },
   'execute_opencode_sync': { url: '/api/proxy/opencode/sync', method: 'POST' },
+  'execute_opencode_openai_sync': { url: '/api/proxy/opencode/openai-sync', method: 'POST' },
   'execute_opencode_restore': { url: '/api/proxy/opencode/restore', method: 'POST' },
   'execute_opencode_clear': { url: '/api/proxy/opencode/clear', method: 'POST' },
   'get_opencode_config_content': { url: '/api/proxy/opencode/config', method: 'POST' },
@@ -90,6 +91,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
 
   // System
   'get_data_dir_path': { url: '/api/system/data-dir', method: 'GET' },
+  'set_data_dir': { url: '/api/system/data-dir', method: 'POST' },
   'get_update_settings': { url: '/api/system/updates/settings', method: 'GET' },
   'save_update_settings': { url: '/api/system/updates/save', method: 'POST' },
   'is_auto_launch_enabled': { url: '/api/system/autostart/status', method: 'GET' },

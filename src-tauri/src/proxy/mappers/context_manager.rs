@@ -614,8 +614,6 @@ impl ContextManager {
                 continue;
             }
             if msg.role == "assistant" && msg.reasoning_content.is_some() {
-                // [FIX] If the assistant message contains tool calls, do NOT strip its reasoning_content/signature.
-                // Otherwise, the signature chain is broken, and Google API throws a 400 thought_signature error for historical tool calls.
                 let has_tool_calls = msg
                     .tool_calls
                     .as_ref()
@@ -629,6 +627,18 @@ impl ContextManager {
                     );
                     msg.reasoning_content = None;
                     modified = true;
+                } else if let Some(ref mut reasoning) = msg.reasoning_content {
+                    // [FIX #3382] For messages with tool calls, compress reasoning_content to "..."
+                    // instead of keeping full text, preserving structure while releasing token burden.
+                    if reasoning.len() > 10 {
+                        tracing::debug!(
+                            "[ContextManager] Purifying (compressing) reasoning_content of message {} with tool_calls (len: {})",
+                            i,
+                            reasoning.len()
+                        );
+                        *reasoning = "...".to_string();
+                        modified = true;
+                    }
                 }
             }
             if msg.role == "user" || msg.role == "assistant" {
@@ -868,6 +878,10 @@ impl ContextManager {
                                         input_audio.data.len(),
                                     );
                                 }
+                                crate::proxy::mappers::openai::models::OpenAIContentBlock::VideoUrl { video_url } => {
+                                    // Video token estimation based on media payload size
+                                    total += estimate_media_tokens_from_url(&video_url.url);
+                                }
                             }
                         }
                     }
@@ -931,13 +945,9 @@ impl ContextManager {
 
             if msg.role == "assistant" {
                 if let Some(ref mut reasoning) = msg.reasoning_content {
-                    // [FIX] If the assistant message contains tool calls, do NOT strip its reasoning_content/signature.
-                    let has_tool_calls = msg
-                        .tool_calls
-                        .as_ref()
-                        .map(|tc| !tc.is_empty())
-                        .unwrap_or(false);
-                    if !has_tool_calls && reasoning.len() > 10 {
+                    // [FIX #3382] Even if the assistant message contains tool calls, compress reasoning_content
+                    // to "..." if it is long. Tool calls and their thoughtSignature remain intact on msg.tool_calls.
+                    if reasoning.len() > 10 {
                         *reasoning = "...".to_string();
                         compressed_count += 1;
                     }
@@ -950,6 +960,7 @@ impl ContextManager {
 
     /// Estimate token usage for a Gemini Request represented as serde_json::Value
     pub fn estimate_gemini_token_usage(body: &Value) -> u32 {
+        let body = body.get("request").unwrap_or(body);
         let mut total = 0;
 
         // systemInstruction
@@ -1138,7 +1149,14 @@ impl ContextManager {
         body: &mut Value,
         protected_last_n: usize,
     ) -> bool {
-        if let Some(contents) = body.get_mut("contents").and_then(|c| c.as_array_mut()) {
+        let contents = if body.get("contents").and_then(|c| c.as_array()).is_some() {
+            body.get_mut("contents").and_then(|c| c.as_array_mut())
+        } else {
+            body.get_mut("request")
+                .and_then(|r| r.get_mut("contents"))
+                .and_then(|c| c.as_array_mut())
+        };
+        if let Some(contents) = contents {
             let total_turns = contents.len();
             if total_turns == 0 {
                 return false;
@@ -1186,6 +1204,27 @@ impl ContextManager {
         } else {
             false
         }
+    }
+
+    /// Re-estimate (and optionally compress) AFTER mapping + thinking restore on the transit body.
+    pub fn apply_post_transit_context_mgmt(body: &mut Value, mapped_model: &str) -> u32 {
+        let estimated = Self::estimate_gemini_token_usage(body);
+        let level = crate::proxy::config::get_global_compression_level();
+        if level != "high" {
+            return estimated;
+        }
+        let context_limit = if mapped_model.to_lowercase().contains("flash") {
+            1_000_000u32
+        } else {
+            2_000_000u32
+        };
+        let ratio = estimated as f32 / context_limit as f32;
+        if ratio > crate::proxy::config::get_global_threshold_l2() {
+            if Self::compress_gemini_thinking_preserve_signature(body, 4) {
+                return Self::estimate_gemini_token_usage(body);
+            }
+        }
+        estimated
     }
 }
 #[cfg(test)]
@@ -1323,5 +1362,54 @@ mod tests {
             assert_eq!(blocks.len(), 1);
             assert!(matches!(blocks[0], ContentBlock::Text { .. }));
         }
+    }
+
+    #[test]
+    fn test_compress_openai_thinking_with_tool_calls() {
+        use crate::proxy::mappers::openai::models::{OpenAIContent, ToolCall, ToolFunction};
+        let mut messages = vec![
+            OpenAIMessage {
+                role: "assistant".into(),
+                refusal: None,
+                content: Some(OpenAIContent::String("read file".into())),
+                reasoning_content: Some(
+                    "a very very long chain of reasoning thoughts that exceeds 10 characters"
+                        .into(),
+                ),
+                signature: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    r#type: "function".into(),
+                    function: Some(ToolFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    }),
+                    signature: None,
+                    status: None,
+                    call_id: None,
+                    operation: None,
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            OpenAIMessage {
+                role: "user".into(),
+                refusal: None,
+                content: Some(OpenAIContent::String("latest user message".into())),
+                reasoning_content: None,
+                signature: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        // protected_last_n = 1 (protects the last user message, leaves index 0 eligible)
+        let modified =
+            ContextManager::compress_openai_thinking_preserve_signature(&mut messages, 1);
+        assert!(modified);
+        assert_eq!(messages[0].reasoning_content.as_deref(), Some("..."));
+        assert!(messages[0].tool_calls.is_some());
+        assert_eq!(messages[0].tool_calls.as_ref().unwrap().len(), 1);
     }
 }

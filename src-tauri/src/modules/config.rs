@@ -79,6 +79,19 @@ pub fn load_app_config() -> Result<AppConfig, String> {
             modified = true;
         }
 
+        // Migrate log retention max_disk_mb: if 0, smoothly recover to 1024 MiB default
+        if let Some(log_retention) = proxy
+            .get_mut("log_retention")
+            .and_then(|m| m.as_object_mut())
+        {
+            if let Some(max_disk_mb) = log_retention.get("max_disk_mb").and_then(|v| v.as_u64()) {
+                if max_disk_mb == 0 {
+                    log_retention.insert("max_disk_mb".to_string(), serde_json::Value::from(1024));
+                    modified = true;
+                }
+            }
+        }
+
         if modified {
             proxy.as_object_mut().unwrap().insert(
                 "custom_mapping".to_string(),
@@ -98,7 +111,7 @@ pub fn load_app_config() -> Result<AppConfig, String> {
     Ok(config)
 }
 
-/// Save application configuration
+/// Save application configuration (atomic write)
 pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     let data_dir = get_data_dir()?;
     let config_path = data_dir.join(CONFIG_FILE);
@@ -106,5 +119,6 @@ pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("failed_to_serialize_config: {}", e))?;
 
-    fs::write(&config_path, content).map_err(|e| format!("failed_to_save_config: {}", e))
+    crate::utils::fs::write_atomic(&config_path, content.as_bytes())
+        .map_err(|e| format!("failed_to_save_config: {}", e))
 }

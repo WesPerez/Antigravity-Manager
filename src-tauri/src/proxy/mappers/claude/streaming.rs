@@ -236,6 +236,7 @@ pub struct StreamingState {
     pub registered_tool_names: Vec<String>,
     // [FIX #3379] Track whether any text_delta was emitted this turn (guard G7)
     pub text_delta_emitted_this_turn: bool,
+    pub thinking_acc: crate::proxy::thinking_store::TurnAccumulator,
 }
 
 impl StreamingState {
@@ -266,6 +267,7 @@ impl StreamingState {
             client_adapter: None,
             registered_tool_names: Vec::new(),
             text_delta_emitted_this_turn: false,
+            thinking_acc: crate::proxy::thinking_store::TurnAccumulator::new(),
         }
     }
 
@@ -321,6 +323,11 @@ impl StreamingState {
 
         if let Some(u) = usage {
             message["usage"] = json!(u);
+        } else {
+            message["usage"] = json!({
+                "input_tokens": 0,
+                "output_tokens": 0
+            });
         }
 
         let result = self.emit(
@@ -367,10 +374,21 @@ impl StreamingState {
 
         let mut chunks = Vec::new();
 
-        // Thinking 块结束时发送暂存的签名
-        if self.block_type == BlockType::Thinking && self.signatures.has_pending() {
-            if let Some(signature) = self.signatures.consume() {
-                chunks.push(self.emit_delta("signature_delta", json!({ "signature": signature })));
+        // Thinking 块结束时发送暂存的签名 (若上游未下发签名则回退到会话签名或哨兵签名)
+        if self.block_type == BlockType::Thinking {
+            let signature = if self.signatures.has_pending() {
+                self.signatures.consume()
+            } else {
+                self.session_id
+                    .as_deref()
+                    .and_then(|sid| {
+                        crate::proxy::SignatureCache::global().get_session_signature(sid)
+                    })
+                    .or_else(|| Some("skip_thought_signature_validator".to_string()))
+            };
+
+            if let Some(sig) = signature {
+                chunks.push(self.emit_delta("signature_delta", json!({ "signature": sig })));
             }
         }
 
@@ -992,9 +1010,7 @@ impl<'a> PartProcessor<'a> {
         }
         let rest = &trimmed[PREFIX.len()..];
         // Tool name ends at the first `{` or `(` delimiter
-        let tool_end = rest
-            .find(|c| c == '{' || c == '(')
-            .unwrap_or(rest.len());
+        let tool_end = rest.find(|c| c == '{' || c == '(').unwrap_or(rest.len());
         let tool_name = rest[..tool_end].trim().to_string();
         if tool_name.is_empty() {
             return None;
@@ -1137,7 +1153,10 @@ impl<'a> PartProcessor<'a> {
         // After the tool name and args there must be nothing else (ignore trailing whitespace)
         let after_tool_name = &trimmed_text["call:default_api:".len() + tool_name.len()..].trim();
         // after_tool_name is either empty (no args) or is the args string itself
-        if !after_tool_name.is_empty() && !after_tool_name.starts_with('{') && !after_tool_name.starts_with('(') {
+        if !after_tool_name.is_empty()
+            && !after_tool_name.starts_with('{')
+            && !after_tool_name.starts_with('(')
+        {
             // There is non-arg text after the tool name — reject
             return None;
         }
@@ -1236,6 +1255,9 @@ impl<'a> PartProcessor<'a> {
             }
         }
 
+        // Record real tool_id into TurnAccumulator for precise session/fingerprint recovery
+        self.state.thinking_acc.record_tool_id(&tool_name, &tool_id);
+
         // 1. 发送 content_block_start (input 为空对象)
         let mut tool_use = json!({
             "type": "tool_use",
@@ -1268,22 +1290,30 @@ impl<'a> PartProcessor<'a> {
         chunks.extend(self.state.start_block(BlockType::Function, tool_use));
 
         // 2. 发送 input_json_delta (完整的参数 JSON 字符串)
-        // [FIX] Remap args before serialization for Gemini → Claude compatibility
-        if let Some(args) = &fc.args {
-            let mut remapped_args = args.clone();
+        // [FIX #Bug2/#Bug4] ALWAYS emit input_json_delta, even for empty/null args.
+        // Claude protocol requires this delta before content_block_stop.
+        // Skipping it causes clients (Claude Code) to misinterpret tool calls as text.
+        {
+            let json_str = if let Some(args) = &fc.args {
+                let mut remapped_args = args.clone();
 
-            let tool_name_title = fc.name.clone();
-            // [OPTIMIZED] Only rename if it's "search" which is a known hallucination.
-            // Avoid renaming "grep" to "Grep" if possible to protect signature,
-            // unless we're sure Grep is the standard.
-            let mut final_tool_name = tool_name_title;
-            if final_tool_name.to_lowercase() == "search" {
-                final_tool_name = "Grep".to_string();
-            }
-            remap_function_call_args(&final_tool_name, &mut remapped_args);
+                let tool_name_title = fc.name.clone();
+                let mut final_tool_name = tool_name_title;
+                if final_tool_name.to_lowercase() == "search" {
+                    final_tool_name = "Grep".to_string();
+                }
+                remap_function_call_args(&final_tool_name, &mut remapped_args);
 
-            let json_str =
-                serde_json::to_string(&remapped_args).unwrap_or_else(|_| "{}".to_string());
+                serde_json::to_string(&remapped_args).unwrap_or_else(|_| "{}".to_string())
+            } else {
+                // [FIX #Bug4] No args provided (e.g. EnterPlanMode): emit empty JSON object
+                tracing::debug!(
+                    "[Streaming] Tool '{}' has no args, emitting empty input_json_delta",
+                    fc.name
+                );
+                "{}".to_string()
+            };
+
             chunks.push(
                 self.state
                     .emit_delta("input_json_delta", json!({ "partial_json": json_str })),
@@ -1480,6 +1510,91 @@ mod tests {
         assert!(output.contains(r#""type":"content_block_stop""#));
     }
 
+    /// [FIX #Bug4] Tool with args=None MUST still emit input_json_delta with "{}"
+    #[test]
+    fn test_process_function_call_no_args_emits_empty_delta() {
+        let mut state = StreamingState::new();
+        let mut processor = PartProcessor::new(&mut state);
+
+        let fc = FunctionCall {
+            name: "EnterPlanMode".to_string(),
+            args: None, // No args at all
+            id: Some("call_no_args".to_string()),
+        };
+
+        let part = GeminiPart {
+            text: None,
+            function_call: Some(fc),
+            inline_data: None,
+            thought: None,
+            thought_signature: None,
+            function_response: None,
+        };
+
+        let chunks = processor.process(&part);
+        let output = chunks
+            .iter()
+            .map(|b| String::from_utf8(b.to_vec()).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+
+        // Must have tool_use block start
+        assert!(output.contains(r#""type":"content_block_start""#));
+        assert!(output.contains(r#""name":"EnterPlanMode""#));
+
+        // [FIX #Bug4] Must emit input_json_delta even for None args
+        assert!(
+            output.contains(r#""type":"input_json_delta""#),
+            "MUST emit input_json_delta even when args is None; output={}",
+            &output[..output.len().min(600)]
+        );
+        assert!(
+            output.contains(r#""partial_json":"{}""#),
+            "input_json_delta must be empty JSON object for None args"
+        );
+
+        // Must close block
+        assert!(output.contains(r#""type":"content_block_stop""#));
+        assert!(state.used_tool);
+    }
+
+    /// [FIX #Bug2] Tool with args=Some({}) (empty obj) MUST still emit input_json_delta
+    #[test]
+    fn test_process_function_call_empty_args_emits_delta() {
+        let mut state = StreamingState::new();
+        let mut processor = PartProcessor::new(&mut state);
+
+        let fc = FunctionCall {
+            name: "SomeTool".to_string(),
+            args: Some(json!({})), // Empty args object
+            id: Some("call_empty".to_string()),
+        };
+
+        let part = GeminiPart {
+            text: None,
+            function_call: Some(fc),
+            inline_data: None,
+            thought: None,
+            thought_signature: None,
+            function_response: None,
+        };
+
+        let chunks = processor.process(&part);
+        let output = chunks
+            .iter()
+            .map(|b| String::from_utf8(b.to_vec()).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+
+        // [FIX #Bug2] Must emit input_json_delta for empty object args
+        assert!(
+            output.contains(r#""type":"input_json_delta""#),
+            "Must emit input_json_delta for empty args object; output={}",
+            &output[..output.len().min(600)]
+        );
+        assert!(state.used_tool);
+    }
+
     #[test]
     fn test_fuzzy_match_mcp_tool_exact_suffix() {
         let registered = vec![
@@ -1615,15 +1730,15 @@ mod tests {
             "Expected tool_use block_start, got: {}",
             output
         );
-        assert!(output.contains(r#""name":"Read""#), "Expected tool name Read");
+        assert!(
+            output.contains(r#""name":"Read""#),
+            "Expected tool name Read"
+        );
         assert!(
             !output.contains("text_delta"),
             "Must NOT produce text_delta for recovered call"
         );
-        assert!(
-            state.used_tool,
-            "used_tool must be true after recovery"
-        );
+        assert!(state.used_tool, "used_tool must be true after recovery");
     }
 
     #[test]
@@ -1679,8 +1794,7 @@ mod tests {
     fn test_3379_negative_surrounding_prose() {
         // G5 guard: text not solely the call expression → text_delta
         let mut state = StreamingState::new();
-        let mut processor =
-            make_processor_with_tools(&mut state, vec!["Read"]);
+        let mut processor = make_processor_with_tools(&mut state, vec!["Read"]);
 
         let text = "Here is what I am doing: call:default_api:Read{\"file_path\":\"/tmp/foo.txt\"}";
         let part = GeminiPart {
@@ -1757,7 +1871,8 @@ mod tests {
     #[test]
     fn test_3379_parse_loose_json_standard() {
         // parse_loose_json_args: standard JSON passes Phase 1
-        let result = PartProcessor::parse_loose_json_args(r#"{"file_path":"/tmp/foo","limit":100}"#);
+        let result =
+            PartProcessor::parse_loose_json_args(r#"{"file_path":"/tmp/foo","limit":100}"#);
         assert!(result.is_some());
         let v = result.unwrap();
         assert_eq!(v["file_path"], "/tmp/foo");

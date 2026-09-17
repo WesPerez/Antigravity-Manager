@@ -1,15 +1,15 @@
 # Antigravity Tools 🚀
-> Professional AI Account Management & Protocol Proxy System (v4.6.6)
+> Professional AI Account Management & Protocol Proxy System (v4.7.4)
 
 <div align="center">
   <img src="public/icon.png" alt="Antigravity Logo" width="120" height="120" style="border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.15);">
 
   <h3>Your Personal High-Performance AI Gateway</h3>
-  <p>More than account management — the ultimate solution for AI API orchestration.</p>
+  <p>Not just account management, but the ultimate solution to break API barriers.</p>
   
   <p>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-4.6.6-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-4.7.4-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -42,7 +42,7 @@ By leveraging this app, you can transform common Web Sessions (Google/Anthropic)
 | Sponsor | Description |
 | :---: | :--- |
 | <img src="docs/images/packycode_logo.png" width="200" alt="PackyCode Logo"> | Thanks to **PackyCode** for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relays for various services such as Claude Code, Codex, and Gemini. PackyCode provides a special offer for users of this project: Register using [this link](https://www.packyapi.com/register?aff=Ctrler) and enter the **"Ctrler"** coupon code when topping up to enjoy a **10% discount**. |
-| <img src="docs/images/APIKEYFUN.png" width="200" alt="APIKEYFUN Logo"> | Thanks to **APIKEY.FUN** for sponsoring this project! APIKEY.FUN is a professional enterprise-grade AI relay station, dedicated to providing stable, efficient, and low-cost AI model API access services for enterprise and individual developers. The platform supports mainstream popular models such as Claude, OpenAI, and Gemini, with prices as low as 7% of the official original price. Register through [this exclusive link](https://apikey.fun/register?aff=Ctrler) for this project to enjoy an exclusive offer of up to **permanent 5% off on top-ups**. |
+| <img src="docs/images/APIKEYFUN.png" width="200" alt="APIKEYFUN Logo"> | Thanks to **APIKEY.FUN** for sponsoring this project! APIKEY.FUN is a professional enterprise-grade AI relay station, dedicated to providing stable, efficient, and low-cost AI model API access services for enterprise and individual developers. The platform supports mainstream popular models such as Claude, OpenAI, and Gemini, with prices as low as 7% of the official original price. Register through [this exclusive link](https://apikey.fan/register?aff=Ctrler) for this project to enjoy an exclusive offer of up to **permanent 5% off on top-ups**. |
 | <img src="docs/images/claudeapilogo.png" width="200" alt="Claude API Logo"> | Thanks to **Claude API** for supporting this project! claudeapi.com is a **Claude API** relay station built on **official and AWS channels**, focused exclusively on Claude, delivering high stability and low latency with full support for Claude Code. Exclusive offer: register via this [exclusive link](https://console.claudeapi.com/register?source=antigravity) to get **free trial credits — zero setup, get started instantly**; enjoy an extra **5% off** when you top up（Contact Support). |
 | <img src="docs/images/AICodeMirror.jpg" width="200" alt="AICodeMirror Logo"> | Thanks to **AICodeMirror** for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, supporting enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for Antigravity-Manager users: register via [this link](https://aicodemirror.ai/register?invitecode=MV5XUM) to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off! |
 
@@ -144,7 +144,7 @@ irm https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.ps
 
 > **Supported formats**: Linux (`.deb` / `.rpm` / `.AppImage`) | macOS (`.dmg`) | Windows (NSIS `.exe`)
 >
-> **Advanced usage**: Install a specific version `curl -fsSL https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.sh | bash -s -- --version 4.6.6`, dry-run mode `curl -fsSL https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.sh | bash -s -- --dry-run`
+> **Advanced usage**: Install a specific version `curl -fsSL https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.sh | bash -s -- --version 4.6.8`, dry-run mode `curl -fsSL https://raw.githubusercontent.com/lbjlaq/Antigravity-Manager/main/install.sh | bash -s -- --dry-run`
 
 #### macOS - Homebrew
 If you have [Homebrew](https://brew.sh/) installed, you can also install via:
@@ -224,6 +224,7 @@ cd docker
 # 2. Start the service
 docker compose up -d
 ```
+> **Log rotation**: Compose limits JSON logs to `100m` per file and keeps `3` files by default to prevent unbounded growth.
 > **Access URL**: `http://localhost:8045` (Admin Console) | `http://localhost:8045/v1` (API Base)
 > **System Requirements**:
 > - **RAM**: **1GB** recommended (minimum 256MB).
@@ -231,13 +232,27 @@ docker compose up -d
 > - **Architecture**: Supports x86_64 and ARM64.
 > **See**: [Docker Deployment Guide (docker)](./docker/README.md)
 
-### 🛠️ Troubleshooting
+<details>
+<summary><b>🛠️ Troubleshooting - Click to expand</b></summary>
 
 #### macOS says "App is damaged"?
 Due to macOS security gatekeeper, non-App Store apps might show this. Run this in Terminal to fix:
 ```bash
 sudo xattr -rd com.apple.quarantine "/Applications/Antigravity Tools.app"
 ```
+
+#### Linux window is black or empty?
+On niri, Hyprland, Sway, and similar compositors, older builds forced `GDK_BACKEND=x11` whenever `DISPLAY` was set, and WebKit then drew a black window. Update to a build that includes this fix, or launch once with:
+
+```bash
+env WEBKIT_DISABLE_DMABUF_RENDERER=1 ANTIGRAVITY_FORCE_WAYLAND=1 antigravity-tools
+```
+
+- `ANTIGRAVITY_FORCE_WAYLAND=1`: keep native Wayland (do not force X11)
+- `ANTIGRAVITY_FORCE_X11=1`: force X11 if you still need it
+- `WEBKIT_DISABLE_DMABUF_RENDERER=1`: disable the WebKit DMA-BUF renderer
+
+</details>
 
 ## 🔌 Quick Integration Examples
 
@@ -335,6 +350,9 @@ with open("output.png", "wb") as f:
 - **`n`**: Number of images to generate (1-10)
 - **`response_format`**: `"b64_json"` or `"url"` (Data URI)
 
+<details>
+<summary><b>🎨 Expand to view more image generation methods & parameter mapping rules (Chat API / Model Suffix / Cherry Studio)</b></summary>
+
 #### Method 2: Chat API + Parameters (✨ New)
 
 **All protocols** (OpenAI, Claude) Chat APIs now support direct `size` and `quality` parameters:
@@ -424,13 +442,16 @@ In clients that support OpenAI protocol (e.g., Cherry Studio), you can configure
 - `quality: "hd"` → Mapped to `4K` resolution
 - `quality: "medium"` → Mapped to `2K` resolution
 
+</details>
+
 ## 📝 Changelog
 
-> Latest version **v4.6.6** (2026-09-03): Gemini 3.7 tool call text leakage (`call:default_api:*`) fail-closed recovery bridge (#3379) with symmetric streaming/non-streaming parity and diagnostic logging. Includes all features and fixes from v4.6.5.
+> Latest version **v4.7.4** (2026-09-17): Unified Pipeline processing engine across OpenAI Chat/Responses, Claude, and Gemini Native protocols; authoritative thinking and cryptographic signature normalization; read-only SQLite connection reuse for tool signature lookups eliminating write transactions and fsync (reducing long-context overhead by 98.5%, from 14.7s to 0.22s); fixed Hermes streaming crash, OpenAI 429/503 errors, and UTF-8 multi-byte panic.
 
 👉 **[View Full Changelog → CHANGELOG_EN.md](CHANGELOG_EN.md)**
 
-## 👥 Contributors
+<details>
+<summary><b>👥 Contributors - Click to expand</b></summary>
 
 <a href="https://github.com/lbjlaq"><img src="https://github.com/lbjlaq.png" width="50px" style="border-radius: 50%;" alt="lbjlaq"/></a>
 <a href="https://github.com/XinXin622"><img src="https://github.com/XinXin622.png" width="50px" style="border-radius: 50%;" alt="XinXin622"/></a>
@@ -463,7 +484,10 @@ In clients that support OpenAI protocol (e.g., Cherry Studio), you can configure
 
 Special thanks to all developers who have contributed to this project.
 
-## 🤝 Special Thanks
+</details>
+
+<details>
+<summary><b>🤝 Special Thanks - Click to expand</b></summary>
 
 This project has referenced or learned from the ideas or code of the following excellent open-source projects during its development (in no particular order):
 
@@ -475,6 +499,8 @@ This project has referenced or learned from the ideas or code of the following e
 *   [aistudio-gemini-proxy](https://github.com/zhongruichen/aistudio-gemini-proxy)
 *   [gcli2api](https://github.com/su-kaka/gcli2api)
 *   [agent-vibes](https://github.com/funny-vibes/agent-vibes)
+
+</details>
 
 *   **License**: **CC BY-NC-SA 4.0**. Strictly for non-commercial use.
 *   **Security**: All account data is encrypted and stored locally in a SQLite database. Data never leaves your device unless sync is enabled.

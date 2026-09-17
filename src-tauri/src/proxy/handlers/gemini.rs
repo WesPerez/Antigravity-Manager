@@ -1,5 +1,6 @@
 // Gemini Handler
 use axum::{
+    body::Body,
     extract::State,
     extract::{Json, Path},
     http::StatusCode,
@@ -11,8 +12,8 @@ use tracing::{debug, error, info};
 use crate::proxy::common::client_adapter::CLIENT_ADAPTERS;
 use crate::proxy::debug_logger;
 use crate::proxy::handlers::common::{
-    apply_retry_strategy, next_rotation_attempt, should_rotate_account, FailureStatusTracker,
-    RequestRetryState, RetryStrategy,
+    apply_retry_strategy, build_token_error_headers, next_rotation_attempt, should_rotate_account,
+    FailureStatusTracker, RequestRetryState, RetryStrategy,
 };
 use crate::proxy::mappers::gemini::{unwrap_response, wrap_request, wrap_request_v2};
 use crate::proxy::server::AppState;
@@ -69,9 +70,14 @@ mod image_success_tests {
 pub async fn handle_generate(
     State(state): State<AppState>,
     Path(model_action): Path<String>,
-    headers: HeaderMap,          // [NEW] Extract headers for adapter detection
+    headers: HeaderMap, // [NEW] Extract headers for adapter detection
+    upstream_recorder: Option<
+        axum::extract::Extension<crate::proxy::monitor::UpstreamRequestBodyHolder>,
+    >,
     Json(mut body): Json<Value>, // 改为 mut 以支持修复提示词注入
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let clean_start = std::time::Instant::now();
+
     // 解析 model:method
     let (model_name, method) = if let Some((m, action)) = model_action.rsplit_once(':') {
         (m.to_string(), action.to_string())
@@ -95,10 +101,20 @@ pub async fn handle_generate(
         debug!("[{}] Client Adapter detected", trace_id);
     }
 
+    // [DEFENSE] 净化 Gemini 原生请求体中的所有 inlineData (过滤或降级空数据/损坏图片)
+    crate::proxy::mappers::common_utils::sanitize_gemini_payload_inline_data(&mut body);
+
+    // [Stage Timing] 阶段耗时度量变量 (毫秒)
+    let clean_micros = clean_start.elapsed().as_micros() as u64;
+    let clean_ms: f64 = clean_micros as f64 / 1000.0;
+    let mut norm_ms: f64 = 0.0;
+    let mut think_fill_ms: f64 = 0.0;
+    let mut ttft_ms: f64 = 0.0;
+
     // 1. 验证方法
     // [NEW] :countTokens 冒号语法，直接代理到上游 v1internal:countTokens
     if method == "countTokens" {
-        return execute_count_tokens(state, model_name, body).await;
+        return Ok(execute_count_tokens(state, model_name, body).await);
     }
 
     if method != "generateContent" && method != "streamGenerateContent" {
@@ -150,16 +166,21 @@ pub async fn handle_generate(
     let mut failure_statuses = FailureStatusTracker::default();
     let mut used_attempts = 0;
 
+    let initial_mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
+        &model_name,
+        &*state.custom_mapping.read().await,
+    );
+
     while let Some(attempt) = next_rotation_attempt(
         &mut used_attempts,
         max_attempts,
         retry_credentials.is_some(),
     ) {
+        // [Stage Timing] 中转归一计时起点
+        let norm_start = std::time::Instant::now();
+
         // 3. 模型路由解析
-        let mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
-            &model_name,
-            &*state.custom_mapping.read().await,
-        );
+        let mapped_model = initial_mapped_model.clone();
         // 提取 tools 列表以进行联网探测 (Gemini 风格可能是嵌套的)
         let tools_val: Option<Vec<Value>> =
             body.get("tools").and_then(|t| t.as_array()).map(|arr| {
@@ -189,7 +210,14 @@ pub async fn handle_generate(
 
         // 4. 获取 Token (使用准确的 request_type)
         // 提取 SessionId (粘性指纹)
-        let session_id = SessionManager::extract_gemini_session_id(&body, &model_name);
+        let fallback_sid = SessionManager::extract_gemini_session_id(&body, &model_name);
+        let session_scope = crate::proxy::thinking_store::SessionScope::from_headers_and_body(
+            &headers,
+            Some(&body),
+            fallback_sid,
+        );
+        let session_id = session_scope.store_key.clone();
+        let client_session_id = session_scope.client_id.clone();
 
         // 关键：根据 force_rotate 标志决定是否轮换账号（支持 Grace Retry 原地重试）
         let (access_token, project_id, email, account_id, _wait_ms) =
@@ -229,10 +257,17 @@ pub async fn handle_generate(
                 {
                     Ok(t) => t,
                     Err(e) => {
-                        return Err((
+                        let headers = build_token_error_headers(
+                            Some(mapped_model.as_str()),
+                            last_email.as_deref(),
+                            &e,
+                        );
+                        return Ok((
                             StatusCode::SERVICE_UNAVAILABLE,
+                            headers,
                             format!("Token error: {}", e),
-                        ));
+                        )
+                            .into_response());
                     }
                 }
             };
@@ -248,7 +283,8 @@ pub async fn handle_generate(
         // [FIX #765] Pass session_id to wrap_request for signature injection
         // [NEW] 获取完整 Token 对象以注入动态规格 (dynamic > static default > 65535)
         let token_obj = token_manager.get_token_by_id(&account_id);
-        let wrapped_body = wrap_request_v2(
+        let tf_start = std::time::Instant::now();
+        let mut wrapped_body = wrap_request_v2(
             &body,
             &project_id,
             &mapped_model,
@@ -257,6 +293,20 @@ pub async fn handle_generate(
             token_obj.as_ref(),
             Some(&token_manager),
         );
+        let tf_micros = tf_start.elapsed().as_micros() as u64;
+        let norm_total_micros = norm_start.elapsed().as_micros() as u64;
+        norm_ms = norm_total_micros.saturating_sub(tf_micros) as f64 / 1000.0;
+        think_fill_ms = tf_micros as f64 / 1000.0;
+
+        let _ =
+            crate::proxy::mappers::context_manager::ContextManager::apply_post_transit_context_mgmt(
+                &mut wrapped_body,
+                &mapped_model,
+            );
+
+        if let Some(ref recorder) = upstream_recorder {
+            recorder.set_value(&wrapped_body);
+        }
 
         if debug_logger::is_enabled(&debug_cfg) {
             let payload = json!({
@@ -296,6 +346,7 @@ pub async fn handle_generate(
             );
         }
 
+        let upstream_req_start = std::time::Instant::now();
         let call_result = match upstream
             .call_v1_internal_with_headers(
                 upstream_method,
@@ -411,6 +462,7 @@ pub async fn handle_generate(
                             tracing::warn!("[Gemini] Empty first chunk received, retrying...");
                             retry_gemini = true;
                         } else {
+                            ttft_ms = upstream_req_start.elapsed().as_micros() as f64 / 1000.0;
                             first_chunk = Some(bytes);
                         }
                     }
@@ -448,6 +500,7 @@ pub async fn handle_generate(
                     let mut meta_sent = false;
                     let mut saw_image_data = false;
                     let mut stream_failed = false;
+                    let mut thinking_acc = crate::proxy::thinking_store::TurnAccumulator::new();
 
                     loop {
                         // [NEW] 阶段 6.2: 补全 __cloudCodeMeta 响应元数据透传
@@ -536,9 +589,13 @@ pub async fn handle_generate(
                                                     for cand in candidates {
                                                         if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                                                             for part in parts {
+                                                                thinking_acc.ingest_part(part);
                                                                 if let Some(sig) = part.get("thoughtSignature").and_then(|s| s.as_str()) {
                                                                     crate::proxy::SignatureCache::global()
                                                                         .cache_session_signature(&s_id_for_stream, sig.to_string(), 1);
+                                                                    if let Some(call_id) = part.get("functionCall").and_then(|f| f.get("id")).and_then(|id| id.as_str()) {
+                                                                        crate::proxy::SignatureCache::global().cache_tool_signature(call_id, sig.to_string());
+                                                                    }
                                                                     debug!("[Gemini-SSE] Cached signature (len: {}) for session: {}", sig.len(), s_id_for_stream);
                                                                 }
                                                             }
@@ -576,6 +633,7 @@ pub async fn handle_generate(
                         }
                     }
 
+                    thinking_acc.commit(&s_id_for_stream);
                     if track_image_success && saw_image_data && !stream_failed {
                         image_success_manager.mark_account_success(&image_success_account);
                         image_success_manager
@@ -595,6 +653,12 @@ pub async fn handle_generate(
                         .header("X-Accel-Buffering", "no")
                         .header("X-Account-Email", &email)
                         .header("X-Mapped-Model", &mapped_model)
+                        .header("X-Session-Id", &client_session_id)
+                        .header("X-Antigravity-Session-Id", &client_session_id)
+                        .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
+                        .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
+                        .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
+                        .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
                         .body(body)
                         .unwrap()
                         .into_response());
@@ -608,14 +672,19 @@ pub async fn handle_generate(
                                 session_id
                             );
                             let unwrapped = unwrap_response(&gemini_resp);
-                            return Ok((
-                                StatusCode::OK,
-                                [
-                                    ("X-Account-Email", email.as_str()),
-                                    ("X-Mapped-Model", mapped_model.as_str()),
-                                ],
-                                Json(unwrapped),
-                            )
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .header("X-Account-Email", &email)
+                                .header("X-Mapped-Model", &mapped_model)
+                                .header("X-Session-Id", &client_session_id)
+                                .header("X-Antigravity-Session-Id", &client_session_id)
+                                .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
+                                .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
+                                .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
+                                .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
+                                .body(Body::from(serde_json::to_string(&unwrapped).unwrap()))
+                                .unwrap()
                                 .into_response());
                         }
                         Err(e) => {
@@ -630,6 +699,7 @@ pub async fn handle_generate(
                 }
             }
 
+            ttft_ms = upstream_req_start.elapsed().as_micros() as f64 / 1000.0;
             let mut gemini_resp: Value = response
                 .json()
                 .await
@@ -665,6 +735,14 @@ pub async fn handle_generate(
                                         sig.to_string(),
                                         1,
                                     );
+                                    if let Some(call_id) = part
+                                        .get("functionCall")
+                                        .and_then(|f| f.get("id"))
+                                        .and_then(|id| id.as_str())
+                                    {
+                                        crate::proxy::SignatureCache::global()
+                                            .cache_tool_signature(call_id, sig.to_string());
+                                    }
                                     debug!("[Gemini-Response] Cached signature (len: {}) for session: {}", sig.len(), session_id);
                                 }
                             }
@@ -673,15 +751,21 @@ pub async fn handle_generate(
                 }
             }
 
+            crate::proxy::thinking_store::capture_gemini_response(&session_id, &gemini_resp);
             let unwrapped = unwrap_response(&gemini_resp);
-            return Ok((
-                StatusCode::OK,
-                [
-                    ("X-Account-Email", email.as_str()),
-                    ("X-Mapped-Model", mapped_model.as_str()),
-                ],
-                Json(unwrapped),
-            )
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .header("X-Account-Email", &email)
+                .header("X-Mapped-Model", &mapped_model)
+                .header("X-Session-Id", &client_session_id)
+                .header("X-Antigravity-Session-Id", &client_session_id)
+                .header("X-Timing-Clean-Ms", format!("{:.3}", clean_ms))
+                .header("X-Timing-Norm-Ms", format!("{:.3}", norm_ms))
+                .header("X-Timing-Thinking-Ms", format!("{:.3}", think_fill_ms))
+                .header("X-Timing-Ttft-Ms", format!("{:.3}", ttft_ms))
+                .body(Body::from(serde_json::to_string(&unwrapped).unwrap()))
+                .unwrap()
                 .into_response());
         }
 
@@ -749,6 +833,17 @@ pub async fn handle_generate(
                     tracing::error!("Failed to set forbidden status: {}", e);
                 }
             }
+        }
+
+        // [FIX] 429 时立即解绑当前会话，确保换号重试与后续请求不会死锁在受限账号上
+        if status_code == 429 || status_code == 529 {
+            token_manager.clear_session_binding(&session_id);
+            tracing::debug!(
+                "[Gemini] Unbound session {} from account {} due to status {}",
+                session_id,
+                email,
+                status_code
+            );
         }
 
         // 确定重试策略
@@ -880,21 +975,18 @@ pub async fn handle_generate(
 
     // 所有尝试均失败：仅当全部结构化失败状态均为 429 时返回 429
     let final_status = failure_statuses.final_status();
+    let headers = build_token_error_headers(
+        Some(initial_mapped_model.as_str()),
+        last_email.as_deref(),
+        &last_error,
+    );
 
-    if let Some(email) = last_email {
-        Ok((
-            final_status,
-            [("X-Account-Email", email)],
-            format!("All accounts exhausted. Last error: {}", last_error),
-        )
-            .into_response())
-    } else {
-        Ok((
-            final_status,
-            format!("All accounts exhausted. Last error: {}", last_error),
-        )
-            .into_response())
-    }
+    Ok((
+        final_status,
+        headers,
+        format!("All accounts exhausted. Last error: {}", last_error),
+    )
+        .into_response())
 }
 
 pub async fn handle_list_models(
@@ -936,17 +1028,12 @@ pub async fn handle_get_model(Path(model_name): Path<String>) -> impl IntoRespon
     }))
 }
 
-/// 处理 /countTokens 斜杠语法路由
-/// 委托给 execute_count_tokens，与 :countTokens 冒号语法共用同一实现
 pub async fn handle_count_tokens(
     State(state): State<AppState>,
     Path(model_name): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    match execute_count_tokens(state, model_name, body).await {
-        Ok(resp) => resp,
-        Err((status, msg)) => (status, Json(json!({ "error": msg }))).into_response(),
-    }
+    execute_count_tokens(state, model_name, body).await
 }
 
 /// 核心 countTokens 实现：透明代理到上游 v1internal:countTokens
@@ -956,8 +1043,11 @@ pub async fn handle_count_tokens(
 pub async fn execute_count_tokens(
     state: AppState,
     model_name: String,
-    body: Value,
-) -> Result<Response, (StatusCode, String)> {
+    mut body: Value,
+) -> Response {
+    // [DEFENSE] 净化 Gemini 原生请求体中的所有 inlineData (过滤或降级空数据/损坏图片)
+    crate::proxy::mappers::common_utils::sanitize_gemini_payload_inline_data(&mut body);
+
     // 1. 模型路由解析
     let mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
         &model_name,
@@ -977,7 +1067,7 @@ pub async fn execute_count_tokens(
 
     let session_id = SessionManager::extract_gemini_session_id(&body, &model_name);
 
-    let (access_token, _project_id, email, account_id, _wait_ms) = state
+    let (access_token, _project_id, email, account_id, _wait_ms) = match state
         .token_manager
         .get_token(
             &config.request_type,
@@ -986,12 +1076,18 @@ pub async fn execute_count_tokens(
             &config.final_model,
         )
         .await
-        .map_err(|e| {
-            (
+    {
+        Ok(t) => t,
+        Err(e) => {
+            let headers = build_token_error_headers(Some(mapped_model.as_str()), None, &e);
+            return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("Token error: {}", e),
+                headers,
+                Json(json!({ "error": format!("Token error: {}", e) })),
             )
-        })?;
+                .into_response();
+        }
+    };
 
     // 3. 包装为 v1internal 格式
     // [已验证] countTokens 与 generateContent 不同: 顶层只允许 "request" 键,
@@ -1006,7 +1102,7 @@ pub async fn execute_count_tokens(
     });
 
     // 4. 调用上游 v1internal:countTokens
-    let call_result = state
+    let call_result = match state
         .upstream
         .call_v1_internal_with_headers(
             "countTokens",
@@ -1017,25 +1113,39 @@ pub async fn execute_count_tokens(
             Some(account_id.as_str()),
         )
         .await
-        .map_err(|e| {
-            (
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
                 StatusCode::BAD_GATEWAY,
-                format!("Upstream call error: {}", e),
+                Json(json!({ "error": format!("Upstream call error: {}", e) })),
             )
-        })?;
+                .into_response();
+        }
+    };
 
     let response = call_result.response;
     let status = response.status();
 
     if !status.is_success() {
         let err_text = response.text().await.unwrap_or_default();
-        return Err((status, format!("Upstream countTokens error: {}", err_text)));
+        return (
+            status,
+            Json(json!({ "error": format!("Upstream countTokens error: {}", err_text) })),
+        )
+            .into_response();
     }
 
-    let gemini_resp: Value = response
-        .json()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
+    let gemini_resp: Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("Parse error: {}", e) })),
+            )
+                .into_response();
+        }
+    };
 
     // 5. 提取 totalTokens (兼容 wrapped / unwrapped 两种响应格式)
     let total_tokens = gemini_resp
@@ -1046,7 +1156,7 @@ pub async fn execute_count_tokens(
         .unwrap_or(0);
 
     // 6. 返回标准 Gemini REST 响应
-    Ok((
+    (
         StatusCode::OK,
         [
             ("X-Account-Email", email.as_str()),
@@ -1054,5 +1164,5 @@ pub async fn execute_count_tokens(
         ],
         Json(json!({ "totalTokens": total_tokens })),
     )
-        .into_response())
+        .into_response()
 }
