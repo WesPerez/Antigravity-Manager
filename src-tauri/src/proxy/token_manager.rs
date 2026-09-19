@@ -35,7 +35,8 @@ fn classify_rate_limit_reason(error_body: &str) -> crate::proxy::rate_limit::Rat
         || body.contains("quota reset")
         || body.contains("quota limit")
         || body.contains("per day")
-        || body.contains("daily quota");
+        || body.contains("daily quota")
+        || body.contains("credits");
 
     if body.contains("model_capacity") {
         RateLimitReason::ModelCapacityExhausted
@@ -1602,18 +1603,11 @@ impl TokenManager {
             // 用户要求：轮询应当遵循 Ultra -> Pro -> Free
             // 既然已经过滤掉了不支持该模型的账号，剩下的都是支持的
             // 此时我们优先使用高级订阅
-            let tier_priority = |tier: &Option<String>| {
-                let t = tier.as_deref().unwrap_or("").to_lowercase();
-                if t.contains("ultra") {
-                    0
-                } else if t.contains("pro") {
-                    1
-                } else if t.contains("free") {
-                    2
-                } else {
-                    3
-                }
-            };
+            // 统一走 models::quota::tier_priority，保证与 UI / 配额解析使用同一套关键词表。
+            // 未知等级一律按 FREE 处理（不再返回 3），否则会出现「UI 显示 FREE、
+            // 调度器却把它排在 FREE 之后」的隐形档位。
+            let tier_priority =
+                |tier: &Option<String>| crate::models::quota::tier_priority(tier.as_deref());
 
             let tier_cmp =
                 tier_priority(&a.subscription_tier).cmp(&tier_priority(&b.subscription_tier));
@@ -3537,6 +3531,25 @@ impl TokenManager {
         self.session_accounts.remove(session_id);
     }
 
+    /// [FIX] 遭遇 429/529 等限流或过载时解绑会话并清空最近使用记录，打破粘性死锁
+    pub async fn unbind_session_and_clear_last_used(&self, session_id: Option<&str>) {
+        if let Some(sid) = session_id {
+            self.session_accounts.remove(sid);
+        }
+        let mut last_used = self.last_used_account.lock().await;
+        *last_used = None;
+    }
+
+    /// 获取当前 Token 池内有效账号数量
+    pub fn tokens_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// 获取当前生效的负载均衡调度模式（从内存中安全读取，无需触碰磁盘）
+    pub async fn get_scheduling_mode(&self) -> crate::proxy::sticky_config::SchedulingMode {
+        self.sticky_config.read().await.mode
+    }
+
     /// 清除所有会话的粘性映射
     pub fn clear_all_sessions(&self) {
         self.session_accounts.clear();
@@ -4662,18 +4675,9 @@ mod tests {
     fn compare_tokens(a: &ProxyToken, b: &ProxyToken) -> Ordering {
         const RESET_TIME_THRESHOLD_SECS: i64 = 600; // 10 分钟阈值
 
-        let tier_priority = |tier: &Option<String>| {
-            let t = tier.as_deref().unwrap_or("").to_lowercase();
-            if t.contains("ultra") {
-                0
-            } else if t.contains("pro") {
-                1
-            } else if t.contains("free") {
-                2
-            } else {
-                3
-            }
-        };
+        // 统一走 models::quota::tier_priority（与生产排序逻辑共用同一实现）
+        let tier_priority =
+            |tier: &Option<String>| crate::models::quota::tier_priority(tier.as_deref());
 
         // First: compare by subscription tier
         let tier_cmp =
@@ -4714,10 +4718,27 @@ mod tests {
         // ULTRA > PRO > FREE
         let ultra = create_test_token("ultra@test.com", Some("ULTRA"), 1.0, None, Some(50));
         let pro = create_test_token("pro@test.com", Some("PRO"), 1.0, None, Some(50));
+        let premium = create_test_token(
+            "premium@test.com",
+            Some("Google One AI Premium"),
+            1.0,
+            None,
+            Some(50),
+        );
+        let advanced = create_test_token(
+            "advanced@test.com",
+            Some("Gemini Advanced"),
+            1.0,
+            None,
+            Some(50),
+        );
         let free = create_test_token("free@test.com", Some("FREE"), 1.0, None, Some(50));
 
         assert_eq!(compare_tokens(&ultra, &pro), Ordering::Less);
+        assert_eq!(compare_tokens(&ultra, &premium), Ordering::Less);
         assert_eq!(compare_tokens(&pro, &free), Ordering::Less);
+        assert_eq!(compare_tokens(&premium, &free), Ordering::Less);
+        assert_eq!(compare_tokens(&advanced, &free), Ordering::Less);
         assert_eq!(compare_tokens(&ultra, &free), Ordering::Less);
         assert_eq!(compare_tokens(&free, &ultra), Ordering::Greater);
     }
@@ -5151,18 +5172,10 @@ mod tests {
                 ULTRA_REQUIRED_MODELS.iter().any(|m| lower.contains(m))
             };
 
-            let tier_priority = |tier: &Option<String>| {
-                let t = tier.as_deref().unwrap_or("").to_lowercase();
-                if t.contains("ultra") {
-                    0
-                } else if t.contains("pro") {
-                    1
-                } else if t.contains("free") {
-                    2
-                } else {
-                    3
-                }
-            };
+            // 直接复用生产实现，避免测试里另写一份「简化版关键词表」
+            // （旧版只匹配 "pro"，漏掉 premium/advanced，导致测试通过但生产行为未经验证）
+            let tier_priority =
+                |tier: &Option<String>| crate::models::quota::tier_priority(tier.as_deref());
 
             // Priority 0: 高端模型时，订阅等级优先
             if requires_ultra {
@@ -5250,18 +5263,10 @@ mod tests {
                 ULTRA_REQUIRED_MODELS.iter().any(|m| lower.contains(m))
             };
 
-            let tier_priority = |tier: &Option<String>| {
-                let t = tier.as_deref().unwrap_or("").to_lowercase();
-                if t.contains("ultra") {
-                    0
-                } else if t.contains("pro") {
-                    1
-                } else if t.contains("free") {
-                    2
-                } else {
-                    3
-                }
-            };
+            // 直接复用生产实现，避免测试里另写一份「简化版关键词表」
+            // （旧版只匹配 "pro"，漏掉 premium/advanced，导致测试通过但生产行为未经验证）
+            let tier_priority =
+                |tier: &Option<String>| crate::models::quota::tier_priority(tier.as_deref());
 
             if requires_ultra {
                 let tier_cmp =
@@ -5299,18 +5304,9 @@ mod tests {
             };
 
             tokens.sort_by(|a, b| {
-                let tier_priority = |tier: &Option<String>| {
-                    let t = tier.as_deref().unwrap_or("").to_lowercase();
-                    if t.contains("ultra") {
-                        0
-                    } else if t.contains("pro") {
-                        1
-                    } else if t.contains("free") {
-                        2
-                    } else {
-                        3
-                    }
-                };
+                // 直接复用生产实现
+                let tier_priority =
+                    |tier: &Option<String>| crate::models::quota::tier_priority(tier.as_deref());
 
                 if requires_ultra {
                     let tier_cmp = tier_priority(&a.subscription_tier)

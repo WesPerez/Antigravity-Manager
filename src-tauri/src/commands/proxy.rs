@@ -71,13 +71,26 @@ pub async fn start_proxy_service(
     cf_state: State<'_, crate::commands::cloudflared::CloudflaredState>,
     app_handle: tauri::AppHandle,
 ) -> Result<ProxyStatus, String> {
-    internal_start_proxy_service(
+    let result = internal_start_proxy_service(
         config,
         &state,
         crate::modules::integration::SystemManager::Desktop(app_handle),
         Arc::new(cf_state.inner().clone()),
     )
-    .await
+    .await?;
+
+    // [FIX desktop] 对齐 Web/Docker admin_start_proxy_service (#1166):
+    // 持久化 auto_start = true，确保重启后自动拉起反代服务
+    if let Ok(mut app_config) = crate::modules::config::load_app_config() {
+        app_config.proxy.auto_start = true;
+        if let Err(e) = crate::modules::config::save_app_config(&app_config) {
+            tracing::warn!("[Desktop] Failed to persist auto_start=true: {}", e);
+        } else {
+            tracing::info!("[Desktop] Persisted auto_start=true to gui_config.json");
+        }
+    }
+
+    Ok(result)
 }
 
 struct StartingGuard(Arc<AtomicBool>);
@@ -334,6 +347,17 @@ pub async fn stop_proxy_service(state: State<'_, ProxyServiceState>) -> Result<(
         // 已移除 instance.axum_server.stop() 调用，防止杀死 Admin Server
     }
 
+    // [FIX desktop] 对齐 Web/Docker admin_stop_proxy_service (#1166):
+    // 持久化 auto_start = false，确保重启后不会自动拉起反代服务
+    if let Ok(mut app_config) = crate::modules::config::load_app_config() {
+        app_config.proxy.auto_start = false;
+        if let Err(e) = crate::modules::config::save_app_config(&app_config) {
+            tracing::warn!("[Desktop] Failed to persist auto_start=false: {}", e);
+        } else {
+            tracing::info!("[Desktop] Persisted auto_start=false to gui_config.json");
+        }
+    }
+
     Ok(())
 }
 
@@ -424,6 +448,14 @@ pub async fn clear_proxy_logs(state: State<'_, ProxyServiceState>) -> Result<(),
     let monitor_lock = state.monitor.read().await;
     if let Some(monitor) = monitor_lock.as_ref() {
         monitor.clear().await;
+    } else {
+        tokio::task::spawn_blocking(|| {
+            if let Err(e) = crate::modules::proxy_db::clear_logs() {
+                tracing::error!("Failed to clear logs in DB: {}", e);
+            }
+        })
+        .await
+        .map_err(|e| format!("Spawn blocking failed: {}", e))?;
     }
     Ok(())
 }
@@ -439,8 +471,14 @@ pub async fn get_proxy_logs_paginated(
 
 /// 获取单条日志的完整详情
 #[tauri::command]
-pub async fn get_proxy_log_detail(log_id: String) -> Result<ProxyRequestLog, String> {
-    crate::modules::proxy_db::get_log_detail(&log_id)
+pub async fn get_proxy_log_detail(
+    log_id: Option<String>,
+    logId: Option<String>,
+) -> Result<ProxyRequestLog, String> {
+    let id = log_id
+        .or(logId)
+        .ok_or_else(|| "Missing log_id parameter".to_string())?;
+    crate::modules::proxy_db::get_log_detail(&id)
 }
 
 /// 获取日志总数
@@ -832,4 +870,10 @@ pub async fn get_proxy_pool_config(
     } else {
         Err("服务未运行".to_string())
     }
+}
+
+/// 获取日志数据库占用的磁盘大小 (字节)
+#[tauri::command]
+pub async fn get_proxy_db_disk_size() -> Result<u64, String> {
+    crate::modules::proxy_db::get_proxy_db_disk_bytes()
 }
