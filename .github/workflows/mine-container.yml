@@ -40,8 +40,8 @@ jobs:
           build-args: |
             USE_MIRROR=false
           tags: |
-            ${{ env.IMAGE_NAME }}:mine
             ${{ env.IMAGE_NAME }}:mine-${{ github.sha }}
+            ${{ github.ref == 'refs/heads/MINE' && format('{0}:mine', env.IMAGE_NAME) || '' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

@@ -2,6 +2,21 @@
 
 本目錄包含 Antigravity Manager 的原生 Headless Docker 部署方案。該方案支持完整的 Web 管理界面、API 反代以及數據持久化，無需複雜的 VNC 或桌面環境。
 
+## Web 子路徑部署
+
+同一個鏡像可直接部署在根路徑，也可由 Nginx 掛載在 `/antimanager/`。
+將 [nginx-subpath.conf](nginx-subpath.conf) 中的 location 配置加入 HTTPS server，
+測試配置後 reload Nginx。使用其他前綴時，同步修改範例中的 `/antimanager`。
+
+Nginx 只在 HTML 的 `<head>` 後插入帶尾斜線的 `<base href="/antimanager/">`。
+前端路由、登入驗證、管理 API 與公共圖片共用此路徑；Vite 保持 `base: './'`，
+因此直接打開或重新整理 `/antimanager/settings` 等深層路徑也能載入資源。
+沒有 base 標籤時使用根路徑，Tauri 桌面模式不使用 Web 前綴。
+
+從舊版配置升級時，移除所有針對 JavaScript 壓縮符號、`/api/` 或圖片字串的
+`sub_filter` 規則，避免重複添加前綴。升級後驗證登入、頁面切換和深層路徑重新整理；
+`/health` 回應成功只能證明後端運作，不能代替瀏覽器驗證。
+
 ## 🆕 本版本部署方案（本地前端構建復用）
 適用於「前端近期不改、後端經常調整」的場景。思路是先在本地生成 `dist/`，Docker 只編譯後端並直接拷貝 `dist/`，大幅縮短構建時間並降低前端構建風險。
 

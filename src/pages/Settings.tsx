@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Save, Github, User, MessageCircle, ExternalLink, RefreshCw, Heart, Coffee, LayoutDashboard, Users, Network, Activity, BarChart3, Settings as SettingsIcon, Lock, CheckCircle2, Globe, Send } from 'lucide-react';
 import { request as invoke } from '../utils/request';
+import { webUrl } from '../utils/webBasePath';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useConfigStore } from '../stores/useConfigStore';
 import { AppConfig } from '../types/config';
@@ -1447,7 +1448,7 @@ function Settings() {
                                     <div className="relative inline-block group">
                                         <div className="absolute inset-0 bg-blue-500/20 rounded-3xl blur-xl group-hover:blur-2xl transition-all duration-500"></div>
                                         <img
-                                            src="/icon.png"
+                                            src={webUrl('/icon.png')}
                                             alt="Antigravity Logo"
                                             className="relative w-24 h-24 rounded-3xl shadow-2xl transform group-hover:scale-105 transition-all duration-500 rotate-3 group-hover:rotate-6 object-cover bg-white dark:bg-black"
                                         />
@@ -1759,7 +1760,7 @@ function Settings() {
                                 {/* Alipay */}
                                 <div className="flex flex-col items-center gap-3 p-4 rounded-2xl bg-gray-50 dark:bg-base-200 border border-gray-100 dark:border-base-300">
                                     <div className="w-full aspect-square relative bg-white rounded-xl overflow-hidden shadow-sm border border-gray-100">
-                                        <img src="/images/donate/alipay.png" alt="Alipay" className="w-full h-full object-contain" />
+                                        <img src={webUrl('/images/donate/alipay.png')} alt="Alipay" className="w-full h-full object-contain" />
                                     </div>
                                     <span className="text-xs font-bold text-gray-700 dark:text-gray-300">{t('settings.about.support_alipay')}</span>
                                 </div>
@@ -1767,7 +1768,7 @@ function Settings() {
                                 {/* WeChat */}
                                 <div className="flex flex-col items-center gap-3 p-4 rounded-2xl bg-gray-50 dark:bg-base-200 border border-gray-100 dark:border-base-300">
                                     <div className="w-full aspect-square relative bg-white rounded-xl overflow-hidden shadow-sm border border-gray-100">
-                                        <img src="/images/donate/wechat.png" alt="WeChat" className="w-full h-full object-contain" />
+                                        <img src={webUrl('/images/donate/wechat.png')} alt="WeChat" className="w-full h-full object-contain" />
                                     </div>
                                     <span className="text-xs font-bold text-gray-700 dark:text-gray-300">{t('settings.about.support_wechat')}</span>
                                 </div>
@@ -1775,7 +1776,7 @@ function Settings() {
                                 {/* Buy Me a Coffee */}
                                 <div className="flex flex-col items-center gap-3 p-4 rounded-2xl bg-gray-50 dark:bg-base-200 border border-gray-100 dark:border-base-300">
                                     <div className="w-full aspect-square relative bg-white rounded-xl overflow-hidden shadow-sm border border-gray-100">
-                                        <img src="/images/donate/coffee.png" alt="Buy Me A Coffee" className="w-full h-full object-contain" />
+                                        <img src={webUrl('/images/donate/coffee.png')} alt="Buy Me A Coffee" className="w-full h-full object-contain" />
                                     </div>
                                     <span className="text-xs font-bold text-gray-700 dark:text-gray-300">{t('settings.about.support_buymeacoffee')}</span>
                                 </div>

@@ -1,3 +1,5 @@
+import { webUrl } from './webBasePath';
+
 // 探测环境
 const isTauri = typeof window !== 'undefined' && (!!(window as any).__TAURI_INTERNALS__ || !!(window as any).__TAURI__);
 
@@ -188,7 +190,7 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
     throw new Error(`Command [${cmd}] not supported in Web mode.`);
   }
 
-  let url = mapping.url;
+  let url = webUrl(mapping.url);
   // [FIX] 创建 args 副本，用于移除已使用的路径参数
   let bodyArgs = args ? { ...args } : undefined;
 
