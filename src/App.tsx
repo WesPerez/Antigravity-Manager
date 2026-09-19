@@ -21,6 +21,7 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauri } from './utils/env';
 import { request as invoke } from './utils/request';
 import { AdminAuthGuard } from './components/common/AdminAuthGuard';
+import { getWebBasename } from './utils/webBasePath';
 
 const router = createBrowserRouter([
   {
@@ -65,7 +66,7 @@ const router = createBrowserRouter([
       },
     ],
   },
-]);
+], { basename: getWebBasename() });
 
 function App() {
   const { config, loadConfig } = useConfigStore();
