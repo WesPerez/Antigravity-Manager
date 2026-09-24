@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Lock, Key, Globe, AlertCircle, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { isTauri } from '../../utils/env';
+import { webUrl } from '../../utils/webBasePath';
 
 /**
  * AdminAuthGuard
@@ -61,7 +62,7 @@ export const AdminAuthGuard: React.FC<{ children: React.ReactNode }> = ({ childr
             sessionStorage.setItem('abv_admin_api_key', trimmedKey);
 
             // 调用一个需要认证的 API 来验证密码是否正确
-            const response = await fetch('/api/accounts', {
+            const response = await fetch(webUrl('/api/accounts'), {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json',
