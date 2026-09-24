@@ -2,41 +2,28 @@
 
 本目錄包含 Antigravity Manager 的原生 Headless Docker 部署方案。該方案支持完整的 Web 管理界面、API 反代以及數據持久化，無需複雜的 VNC 或桌面環境。
 
-## 🆕 本版本部署方案（本地前端構建復用）
-適用於「前端近期不改、後端經常調整」的場景。思路是先在本地生成 `dist/`，Docker 只編譯後端並直接拷貝 `dist/`，大幅縮短構建時間並降低前端構建風險。
+## 本 Fork 只允許遠端構建
 
-**步驟**
-1. 本地生成前端靜態資源：
+**禁止在本機伺服器下載或安裝專案依賴、編譯、打包、構建前端或 Docker 鏡像。**
+臨時目錄、worktree、本機容器和驗收測試都不能繞過此規則；不可先在本機產生 `dist/`
+再提交或交給 Docker 使用。詳細約束見 [AGENTS.md](../AGENTS.md) 和
+[Fork 部署約定](../FORK_DEPLOYMENT.md)。
+
+日常發布只有一條路徑：
+
 ```bash
-npm ci --legacy-peer-deps
-npm run build
-```
-2. 使用本方案構建與啟動（後端-only + 復用 `dist/`）：
-```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.localdist.yml build
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.localdist.yml up -d
-```
-或合併為單條命令：
-```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.localdist.yml up -d --build
+git push origin MINE
 ```
 
-啟動後動態查看日誌：
-```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.localdist.yml logs -f --tail=200
-```
-
-**更新方式**
-- 後端有改動：重跑上面的 `build` + `up -d`
-- 前端有改動：先在本地重新 `npm run build`，再重跑 `build` + `up -d`
-
-**Git 部署提醒**
-- 若服務器不在本地構建前端，請確保 `dist/` 已提交到倉庫（本版本已從 `.gitignore` 移除）。
+GitHub-hosted Actions runner 負責下載依賴及完整構建，將鏡像推送至
+`ghcr.io/wesperez/antigravity-manager:mine`；現有 Watchtower 自動拉取並替換容器。
+CI 失敗時修正程式或遠端工作流，不得改成本機構建。後端、前端和測試都遵循同一規則。
 
 ## 🚀 快速開始
 
-### 1. 直接拉取鏡像 (推薦)
-您可以直接從 Docker Hub 拉取已構建好的鏡像並啟动，無需獲取源碼：
+### 1. 首次安裝使用已發布鏡像
+以下僅是首次安裝範例；現有生產服務由 Watchtower 更新，不應重複建立容器。
+只使用遠端已發布鏡像，無需在伺服器安裝依賴或獲取構建工具：
 
 > [!IMPORTANT]
 > **安全警告**：從 v4.0.3 開始，Docker 版支持 **管理密碼與 API Key 分離**：
@@ -49,12 +36,14 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.localdist.y
 # 啟動容器 (請替换 your-secret-key 為強密鑰)
 docker run -d \
   --name antigravity-manager \
-  -p 8045:8045 \
+  --restart unless-stopped \
+  --label com.centurylinklabs.watchtower.enable=true \
+  -p 127.0.0.1:8045:8045 \
   -e API_KEY=your-api-key \
   -e WEB_PASSWORD=your-login-password \
   -e ABV_MAX_BODY_SIZE=104857600 \
   -v ~/.antigravity_tools:/root/.antigravity_tools \
-  lbjlaq/antigravity-manager:latest
+  ghcr.io/wesperez/antigravity-manager:mine
 ```
 
 #### 🔐 鑒權邏輯 (Security Scenarios)
@@ -77,47 +66,16 @@ docker run -d \
 > - **回退機制**: 如果上述兩者皆未設置，則回退使用 `API_KEY`；若連 `API_KEY` 也未設置，則隨機生成。
 
 ### 2. 使用 Docker Compose
-在 `docker` 目錄下執行：
-```bash
-docker compose up -d
-```
+上游保留的 Compose 範例帶有 `build:`，不是本伺服器的發布入口，不可直接執行。
+現有容器的資料、密碼、回環埠與雙網路配置以 [部署合同](../FORK_DEPLOYMENT.md) 為準。
+首次安裝若使用 Compose，必須只引用已發布的遠端 `image:`，不能包含本機 `build:`。
 
-### 3. 手動構建鏡像 (開發者 / 二改版)
-如果您需要修改代碼或自定義構建，請在項目根目錄下執行：
+### 3. 構建參數只在遠端 CI 使用
 
-**Windows PowerShell（推薦）**
-```powershell
-# 一鍵構建二改版鏡像（標籤 antigravity-manager:local + 版本-fix）
-.\docker\build.ps1
-
-# 国内網絡加速
-.\docker\build.ps1 -UseMirror
-
-# 構建並推送到你自己的倉庫
-.\docker\build.ps1 -UseMirror -Push -Registry "yourname/antigravity-manager"
-```
-
-**手動 docker build**
-```bash
-# 默認構建最新標籤
-docker build -t antigravity-manager:local -f docker/Dockerfile .
-
-# 二改版 Compose 啟動（Windows 可用端口映射，不用 host 網絡）
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.fork.yml up -d --build
-```
-
-#### 💡 構建參數
-本鏡像支持自動鏡像源切換，以提升国内構建速度：
-*   `USE_MIRROR`: 
-    *   `auto` (默認): 自動檢測網絡環境，若無法訪問 Google 則切換至国内镜像（阿里云/NPM Mirror）。
-    *   `true`: 強制使用国内镜像源。
-    *   `false`: 強制使用官方默認源。
-
-示例：
-```bash
-# 強制使用国内镜像加速構建
-docker build --build-arg USE_MIRROR=true -t antigravity-manager:latest -f docker/Dockerfile .
-```
+MINE 工作流在 GitHub-hosted runner 上執行 `docker/Dockerfile`，並設定
+`USE_MIRROR=false`。需要修改構建參數時提交工作流修改，再交由 GitHub Actions 執行。
+`build.ps1`、backend-only/localdist Dockerfile 和本機 Compose 構建範例都不允許在本機
+伺服器執行；它們不能替代遠端完整構建。
 
 ## ⚙️ 環境變量配置
 
@@ -138,12 +96,9 @@ docker build --build-arg USE_MIRROR=true -t antigravity-manager:latest -f docker
 *   **管理界面**: [http://localhost:8045](http://localhost:8045)
 *   **API Base**: [http://localhost:8045/v1](http://localhost:8045/v1)
 
-## 📦 Docker Hub 分發 (推薦)
-若要推送至你的倉庫：
-```bash
-# 打上版本標籤並推送
-docker tag antigravity-manager:latest lbjlaq/antigravity-manager:latest
-docker tag antigravity-manager:latest lbjlaq/antigravity-manager:4.3.0
-docker push lbjlaq/antigravity-manager:latest
-docker push lbjlaq/antigravity-manager:4.3.0
-```
+## 📦 GHCR 發布與驗收
+
+鏡像只由 MINE 的 GitHub Actions 發布，同時保留 `mine-<完整提交號>` 與生產 `mine`
+標籤。以鏡像 digest 和 `org.opencontainers.image.revision` 核對實際版本。
+Watchtower 完成更新後檢查 `/health`、網頁登入、頁面切換與深層路徑重新整理。
+伺服器不執行鏡像構建、手動打包或將本機產物推送至 registry。
