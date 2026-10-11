@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "state_root": "/var/lib/antigravity-manager-auto-update",
+  "application": {
+    "id": "antigravity",
+    "enabled": true,
+    "repository": "WesPerez/Antigravity-Manager",
+    "kind": "container",
+    "branch": "MINE",
+    "workflow": ".github/workflows/mine-container.yml",
+    "container": "antigravity-manager",
+    "image": "ghcr.io/wesperez/antigravity-manager",
+    "root": "/root/.antigravity_tools",
+    "env_file": "/etc/antigravity-manager/runtime.env",
+    "data_target": "/root/.antigravity_tools",
+    "host_ip": "127.0.0.1",
+    "host_port": 8045,
+    "container_port": 8045,
+    "networks": {"bridge": []},
+    "restart": "unless-stopped",
+    "logging": {"driver": "json-file", "options": {"max-size": "20m", "max-file": "3"}},
+    "health": {"url": "http://127.0.0.1:8045/health", "json": {"status": "ok"}},
+    "web": {"url": "http://127.0.0.1:8045/", "base_path": "/"},
+    "min_accounts": 0,
+    "locks": ["/run/lock/antigravity-manager-deploy.lock"]
+  }
+}

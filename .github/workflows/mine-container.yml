@@ -10,6 +10,10 @@ env:
   CI_FALLBACK_CONTRACT: '1'
   IMAGE_NAME: ghcr.io/wesperez/antigravity-manager
 
+concurrency:
+  group: mine-container-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -20,6 +24,12 @@ jobs:
     steps:
       - name: Check out MINE
         uses: actions/checkout@v4
+
+      - name: Test independent updater
+        run: python3 -B -m unittest discover -s deploy/auto-update/tests -p 'test_*.py' -v
+
+      - name: Package independent updater
+        run: python3 -B deploy/auto-update/package.py --output "$RUNNER_TEMP/auto-update.tar.gz"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -43,13 +53,19 @@ jobs:
             USE_MIRROR=false
           tags: |
             ${{ env.IMAGE_NAME }}:mine-${{ github.sha }}
-            ${{ (vars.CI_SOURCE_REF || github.ref) == 'refs/heads/MINE' && format('{0}:mine', env.IMAGE_NAME) || '' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ vars.CI_PRIMARY_REPOSITORY || github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.ref.name=MINE
           cache-from: type=gha,scope=antigravity-manager-mine
           cache-to: type=gha,mode=max,scope=antigravity-manager-mine
+
+      - name: Verify published image, replacement and rollback
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
+          sudo -E python3 -B deploy/auto-update/ci_smoke.py
 
       - name: Record published image
         env:
@@ -69,3 +85,17 @@ jobs:
           name: image-metadata
           path: image-metadata.json
           if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auto-update
+          path: ${{ runner.temp }}/auto-update.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish accepted MINE alias
+        if: (vars.CI_SOURCE_REF || github.ref) == 'refs/heads/MINE'
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: docker buildx imagetools create --tag "$IMAGE_NAME:mine" "$IMAGE_NAME@$IMAGE_DIGEST"

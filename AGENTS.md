@@ -8,8 +8,11 @@ upstream examples that describe local dependency installation or builds.
 
 - Upstream is `lbjlaq/Antigravity-Manager`. Keep `main` as an unmodified upstream
   mirror. Production uses `MINE` and `ghcr.io/wesperez/antigravity-manager:mine`.
-- Keep the current upstream release followed by exactly two customization
-  commits: deployment/remote-build policy, then web reverse-proxy subpath support.
+- Keep two customization responsibilities: deployment/remote-build policy
+  (including the independent updater), then web reverse-proxy subpath support.
+  Ordinary improvements append reviewed commits without rewriting published
+  history. At an explicitly authorized upstream history refresh, fold these
+  responsibilities back into two commits on the selected upstream release.
 - Keep backend behavior aligned with upstream. Do not mix unrelated application
   changes into either customization or leave temporary debugging commits on `MINE`.
 - An upstream update must preserve both responsibilities. Inspect the final diff
@@ -42,9 +45,11 @@ upstream examples that describe local dependency installation or builds.
 
 - Push `MINE` to trigger `.github/workflows/mine-container.yml`. CI builds the
   complete image and publishes the revision tag plus the production `mine` tag.
-- The existing Watchtower watches `antigravity-manager`, pulls the published
-  image, and replaces the container. Do not manually build, pull/recreate the
-  production container, or bypass Watchtower for an ordinary release.
+- The repository-owned `antigravity-manager-auto-update.timer` verifies the
+  current MINE tip's successful CI, pulls its exact image digest, snapshots state,
+  replaces the single container, and rolls back on failed acceptance. Use
+  `deploy/auto-update/`; do not enable Watchtower for this container or bypass
+  the updater for an ordinary release.
 - First installation or explicitly authorized recovery still uses a published
   image; it never permits a local dependency download or build. Preserve the
   data mount, credentials, loopback binding, and both existing Docker networks.

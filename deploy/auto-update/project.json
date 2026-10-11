@@ -1,0 +1,12 @@
+{
+  "id": "antigravity",
+  "repository": "WesPerez/Antigravity-Manager",
+  "kind": "container",
+  "workflow": ".github/workflows/mine-container.yml",
+  "name": "antigravity-manager",
+  "branch": "MINE",
+  "required_jobs": [
+    "build-and-push"
+  ],
+  "source_path": "deploy/auto-update"
+}

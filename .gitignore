@@ -43,6 +43,7 @@ environment/
 .venv*/
 venv/
 test_*.py
+!deploy/auto-update/tests/test_*.py
 __pycache__/
 *.pyc
 

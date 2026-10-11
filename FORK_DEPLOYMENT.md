@@ -5,16 +5,17 @@
 上游 `main` 原样同步到镜像分支，生产跟随稳定发行版。
 `main` 保持上游原样；生产分支为 `MINE`。
 
-## 只保留两条个性化提交
+## 保留两项个性化职责
 
 | 顺序 | 职责 | 范围 |
 | --- | --- | --- |
-| 1 | 部署与远程构建 | MINE 镜像工作流、AGENTS 约束和部署文档；禁止本机下载依赖及构建 |
+| 1 | 部署与远程构建 | MINE 镜像工作流、仓库内独立更新器、AGENTS 约束和部署文档；禁止本机下载依赖及构建 |
 | 2 | 网页子路径访问 | 反代前缀、前端路由/API/图片路径及 Nginx 配置示例 |
 
-两条提交都直接接在选定的上游版本之后。后端 `src-tauri/` 保持与该上游版本一致。
-后续升级先核对上游新版本，再迁移这两项职责；不要累积临时修复、重复提交或把所有
-差异埋进合并提交说明。已经发布的历史需要整理时，先保存恢复引用，取得用户对该次
+后端 `src-tauri/` 保持与所选上游版本一致。普通部署职责改进追加审阅过的提交，
+不为维持提交数而重写已发布历史。后续获得授权的上游历史整理中，核对上游版本，
+再将这两项职责各收为一条提交；不要把差异埋进合并提交说明。
+已经发布的历史需要整理时，先保存恢复引用，取得用户对该次
 历史整理的授权，再使用绑定旧远端 SHA 的 `--force-with-lease`，禁止无条件强推。
 
 ## 禁止在本机下载依赖和构建
@@ -37,7 +38,7 @@ runner；不得以排错、验收、节约等待时间或“完成后会删除�
 
 ```text
 编辑并审阅源码 → 提交并推送 MINE → GitHub Actions 安装依赖、构建/打包
-→ GHCR 发布镜像 → 现有 Watchtower 拉取并替换容器 → 核对版本和运行状态
+→ GHCR 发布镜像与精确 CI 证据 → 本仓库独立更新器验收/部署 → 失败自动回退容器
 ```
 
 正常发布入口：
@@ -51,25 +52,28 @@ git push origin MINE
 镜像发布到 `ghcr.io/wesperez/antigravity-manager`：
 
 - `mine-<完整 Git SHA>`：用于对应提交的追溯；实际镜像身份以 digest 为准。
-- `mine`：Watchtower 跟踪的生产标签。
+- `mine`：远程镜像验收成功后更新的便利标签，自动部署以 CI 记录的 digest 为准。
 - `org.opencontainers.image.revision`：核验运行镜像所对应的提交。
 
 构建失败应在源码或远程 CI 中修复并重新推送，不得切换到服务器本地构建。
-普通发布由 Watchtower 完成，不手工重建容器；首次安装或用户明确授权的恢复，也只能
-使用远程发布的镜像。项目打包产物如有需要，同样在远程 Actions 内生成。
+普通发布由 `antigravity-manager-auto-update.timer` 完成，不手工重建容器；首次安装或
+用户明确授权的恢复，也只能使用远程发布的镜像。更新器包同样在远程 Actions 内生成。
+安装、迁机和恢复见 [独立更新器说明](deploy/auto-update/README.md)。
 
 ## 本机现有部署合同
 
-- 容器名：`antigravity-manager`；镜像：`ghcr.io/wesperez/antigravity-manager:mine`。
-- Watchtower 标签：`com.centurylinklabs.watchtower.enable=true`。现有 watcher 每 120 秒
-  检查一次；SUB2 的独立发布门禁不属于本项目的发布操作。
-- 宿主 Watchtower 关闭即时 `--cleanup`；[release-retention](https://github.com/WesPerez/server-scheduled-tasks/tree/main/tasks/release-retention)
+- 容器名：`antigravity-manager`；镜像：`ghcr.io/wesperez/antigravity-manager@sha256:<已验收摘要>`。
+- 新容器的 Watchtower 标签为 `com.centurylinklabs.watchtower.enable=false`；本项目
+  timer 每两分钟检查 MINE。SUB2 的独立发布门禁不属于本项目的发布操作。
+- [release-retention](https://github.com/WesPerez/server-scheduled-tasks/tree/main/tasks/release-retention)
   每小时按实际容器 image ID 保留当前和上一版，在 24 小时健康/观察门禁后清理更早无引用镜像。
-  可变标签、停止容器和显式 pin 均保护；镜像不代替数据/凭据恢复组，不执行全局 prune。
+  可变标签、停止容器和显式 pin 均保护；与更新器共用
+  `/run/lock/antigravity-manager-deploy.lock`。镜像不代替数据/凭据恢复组，不执行全局 prune。
 - 端口：`127.0.0.1:8045`。Nginx 对外提供 `/antimanager/`。
 - 数据挂载：`/root/.antigravity_tools:/root/.antigravity_tools`。
 - 保留原有 API Key/Web 密码及 Docker `bridge`、`sub2api-prod_default` 双网络，后者
   保留 `antigravity-manager` 别名。不得套用上游 host-network Compose 覆盖现有配置。
 
-发布后只读核对 Actions 成功、运行镜像的 revision/digest、`/health`，并验证网页登录、
-切页和深链接刷新。等待 Watchtower 时读取状态和日志，不另外安装依赖或启动本机构建。
+发布后核对 Actions 成功、运行镜像的 revision/digest、`/health`，并验证网页登录、
+管理鉴权、账号读取、前端资产和深链接刷新。独立更新器保留上一容器与一致数据库恢复
+副本，只回滚镜像，不倒写业务数据。等待更新时读取 timer 状态和日志，不本机构建。
