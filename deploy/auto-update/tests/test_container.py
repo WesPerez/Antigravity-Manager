@@ -108,6 +108,28 @@ class ContractTests(unittest.TestCase):
                 adapters.contract(self.app, self.obj)
 
 
+class ProbeTests(unittest.TestCase):
+    def test_fresh_empty_instance_can_open_admin_ui_but_production_floor_stays_enforced(self):
+        app = json.loads((HERE / 'config.example.json').read_text())['application']
+        page = '<html><script src="./assets/app.js"></script></html>'
+        for floor, count, running, accepted in ((0, 0, False, True), (1, 0, False, False), (0, 1, False, False)):
+            with self.subTest(floor=floor, count=count):
+                responses = [(200, 'application/json', '{"status":"ok"}'),
+                             (200, 'application/json', json.dumps({'running': running, 'port': 8045, 'active_accounts': count})),
+                             (200, 'application/json', '{"accounts":[]}'), (401, '', ''),
+                             (200, 'text/html', page), (200, 'text/javascript', 'x' * 2048),
+                             (200, 'text/html', page), (200, 'application/json', '{"accounts":[]}'), (401, '', '')]
+                with patch.object(adapters, 'inspect', return_value={'Id': NEW, 'State': {'Running': True, 'Health': {'Status': 'healthy'}}}), \
+                     patch.object(adapters, 'environment', return_value={'WEB_PASSWORD': 'synthetic'}), \
+                     patch.object(adapters, 'run', return_value=page), \
+                     patch.object(adapters, 'request', side_effect=responses):
+                    if accepted:
+                        self.assertEqual(adapters.probe_once({**app, 'min_accounts': floor}), 0)
+                    else:
+                        with self.assertRaises(common.Deferred):
+                            adapters.probe_once({**app, 'min_accounts': floor})
+
+
 class TransactionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

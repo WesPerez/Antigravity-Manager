@@ -114,8 +114,12 @@ def probe_once(app, *, expected_accounts=0):
     code, mime, body = request(base + '/api/proxy/status', headers=headers)
     value = json.loads(body) if code == 200 and 'json' in mime else {}
     count = value.get('active_accounts')
-    if (value.get('running') is not True or value.get('port') != app['container_port']
-            or type(count) is not int or count < max(app.get('min_accounts', 0), expected_accounts)):
+    floor = max(app.get('min_accounts', 0), expected_accounts)
+    # Upstream deliberately pauses proxying on a fresh install with no accounts;
+    # its authenticated management UI remains available to add the first one.
+    if (type(value.get('running')) is not bool or value.get('port') != app['container_port']
+            or type(count) is not int or count < floor
+            or (max(floor, count) > 0 and value['running'] is not True)):
         raise Deferred('Authenticated account loading failed')
     code, mime, body = request(base + '/api/accounts', headers=headers)
     if code != 200 or 'json' not in mime or not isinstance(json.loads(body).get('accounts'), list):
@@ -158,9 +162,10 @@ def probe(app, *, attempts=1, expected_accounts=0):
     for attempt in range(attempts):
         try:
             return probe_once(app, expected_accounts=expected_accounts)
-        except (Deferred, ValueError, KeyError):
+        except (Deferred, ValueError, KeyError) as error:
             if attempt + 1 == attempts:
-                raise Deferred('Application acceptance failed') from None
+                detail = str(error) if isinstance(error, Deferred) else type(error).__name__
+                raise Deferred('Application acceptance failed: ' + detail) from None
             time.sleep(2)
 
 

@@ -44,6 +44,7 @@ def main():
         run(['docker', 'run', '-d', '--name', proxy, '--network', network,
              '-p', '127.0.0.1:18045:80', '--mount', f'type=bind,src={root / "nginx.conf"},dst=/etc/nginx/conf.d/default.conf,readonly',
              'nginx:stable-alpine'], timeout=180)
+        print('smoke: accept fresh account-free management UI', flush=True)
         adapters.probe(app, attempts=60)
         # Store a real sentinel alongside the app's SQLite stores. No account or
         # upstream API requests are necessary to prove data survival.
@@ -57,6 +58,7 @@ def main():
             # upstream IP after each replacement, just as Docker DNS clients do.
             run(['docker', 'exec', proxy, 'nginx', '-s', 'reload'])
             return initial_probe(*args, **kwargs)
+        print('smoke: replace container and verify networks/data', flush=True)
         with patch.object(adapters, 'probe', side_effect=after_start):
             accepted = adapters.deploy(app, prepared, verified, None, state, sha)
         assert accepted['state'] == 'success'
@@ -76,6 +78,7 @@ def main():
             if calls == 2:  # preflight passed, candidate acceptance fails
                 raise Deferred('Synthetic candidate rejection')
             return after_start(*args, **kwargs)
+        print('smoke: reject candidate and restore the exact predecessor', flush=True)
         try:
             with patch.object(adapters, 'probe', side_effect=fail_candidate):
                 adapters.deploy(app, prepared, verified, None, state, sha)

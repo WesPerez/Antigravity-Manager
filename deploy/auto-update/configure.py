@@ -51,7 +51,7 @@ def main():
     atomic(env_path, ''.join(key + '=' + value + '\n' for key, value in sorted(runtime.items())).encode())
     try:
         adapters.contract(app, obj)
-        adapters.probe(app)
+        app['min_accounts'] = min(adapters.probe(app), 1)
         write_json(CONFIG, config)
     except BaseException:
         env_path.unlink()

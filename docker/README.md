@@ -35,13 +35,15 @@ git push origin MINE
 ```
 
 GitHub-hosted Actions runner 負責下載依賴及完整構建，將鏡像推送至
-`ghcr.io/wesperez/antigravity-manager:mine`；現有 Watchtower 自動拉取並替換容器。
+`ghcr.io/wesperez/antigravity-manager:mine`；本倉庫的獨立更新器核對 MINE 提交與成功 CI，
+按鏡像 digest 自動更新並驗收，失敗時回退容器。安裝與遷機見
+[獨立更新器說明](../deploy/auto-update/README.md)。
 CI 失敗時修正程式或遠端工作流，不得改成本機構建。後端、前端和測試都遵循同一規則。
 
 ## 🚀 快速開始
 
 ### 1. 首次安裝使用已發布鏡像
-以下僅是首次安裝範例；現有生產服務由 Watchtower 更新，不應重複建立容器。
+以下僅是首次安裝範例；現有生產服務由 `antigravity-manager-auto-update.timer` 更新，不應重複建立容器。
 只使用遠端已發布鏡像，無需在伺服器安裝依賴或獲取構建工具：
 
 > [!IMPORTANT]
@@ -56,7 +58,7 @@ CI 失敗時修正程式或遠端工作流，不得改成本機構建。後端�
 docker run -d \
   --name antigravity-manager \
   --restart unless-stopped \
-  --label com.centurylinklabs.watchtower.enable=true \
+  --label com.centurylinklabs.watchtower.enable=false \
   -p 127.0.0.1:8045:8045 \
   -e API_KEY=your-api-key \
   -e WEB_PASSWORD=your-login-password \
@@ -119,5 +121,5 @@ MINE 工作流在 GitHub-hosted runner 上執行 `docker/Dockerfile`，並設定
 
 鏡像只由 MINE 的 GitHub Actions 發布，同時保留 `mine-<完整提交號>` 與生產 `mine`
 標籤。以鏡像 digest 和 `org.opencontainers.image.revision` 核對實際版本。
-Watchtower 完成更新後檢查 `/health`、網頁登入、頁面切換與深層路徑重新整理。
+獨立更新器完成更新後檢查 `/health`、網頁登入、頁面切換與深層路徑重新整理。
 伺服器不執行鏡像構建、手動打包或將本機產物推送至 registry。
