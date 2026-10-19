@@ -23,6 +23,8 @@ import zipfile
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+REQUEST = re.compile(r"request-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\Z")
+DISPATCH_DISABLED = "Actions has been disabled for this repository."
 MAX_DOWNLOAD = 4 * 1024 * 1024
 MAX_DOCUMENT = 1024 * 1024
 BILLING_PREFIX = (
@@ -42,6 +44,35 @@ def require(condition, message):
 
 def positive(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def source_id(value):
+    """Legacy --run-id also transports explicit request-UUID tokens, never fake runs."""
+    if positive(value):
+        return value
+    if isinstance(value, str):
+        if re.fullmatch(r"[1-9][0-9]*", value):
+            return int(value)
+        if REQUEST.fullmatch(value):
+            return value
+    raise ValueError("Expected a positive GitHub run ID or request-UUID token")
+
+
+def valid_rejection(rejection):
+    return (isinstance(rejection, dict) and rejection.get("status") == 422 and
+            rejection.get("message") == DISPATCH_DISABLED and
+            rejection.get("actions_enabled") is True and rejection.get("workflow_state") == "active")
+
+
+def valid_authorization(value):
+    """A durable controller decision, distinct from a fabricated GitHub rejection."""
+    return (isinstance(value, dict) and value.get('kind') == 'billing_cycle_skip'
+            and positive(value.get('account_id'))
+            and re.fullmatch(r'[0-9]{4}-(0[1-9]|1[0-2])', str(value.get('cycle', ''))) is not None
+            and isinstance(value.get('proof'), dict)
+            and value['proof'].get('kind') == 'zero_execution_billing'
+            and positive(value['proof'].get('run_id'))
+            and positive(value['proof'].get('run_attempt')))
 
 
 def digest(data):
@@ -159,26 +190,75 @@ def checked_download(github, path, expected, size=None):
     return data
 
 
+def release_artifacts(github, repository, run, *, optional=False):
+    """Read run-bound ZIP assets; completed CI, not a Release label, proves success."""
+    tag = f"ci-artifacts-{run['id']}-{run['run_attempt']}"
+    matches = [item for item in github.pages(f"repos/{repository}/releases")
+               if item.get("tag_name") == tag]
+    if not matches and optional:
+        return []
+    require(len(matches) == 1, "Exactly one CI artifact release is required")
+    release = matches[0]
+    expected = {"schema_version": 1, "kind": "ci-release-artifacts",
+                "repository": repository, "repository_id": run["repository"]["id"],
+                "run_id": run["id"], "run_attempt": run["run_attempt"],
+                "sha": run["head_sha"], "workflow_path": run["path"]}
+    require(release.get("draft") is True and release.get("prerelease") is True
+            and release.get("target_commitish") == run["head_sha"],
+            "CI artifact release revision or visibility changed")
+    require(isinstance(release.get("body"), str), "Missing CI release identity")
+    require(document(release["body"].encode()) == expected,
+            "CI artifact release belongs to another run, attempt or workflow")
+    assets = github.pages(f"repos/{repository}/releases/{release['id']}/assets")
+    require(bool(assets), "CI artifact release has no assets")
+    result = []
+    for asset in assets:
+        filename = asset.get("name", "")
+        require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.zip", filename),
+                "Invalid CI release artifact filename")
+        require(positive(asset.get("id")) and positive(asset.get("size"))
+                and isinstance(asset.get("digest"), str) and DIGEST.fullmatch(asset["digest"])
+                and asset.get("state") == "uploaded", "Incomplete CI release artifact")
+        result.append({"id": asset["id"], "name": filename[:-4],
+                       "digest": asset["digest"], "size": asset["size"],
+                       "size_in_bytes": asset["size"], "expired": False,
+                       "storage": "release", "download_path":
+                       f"repos/{repository}/releases/assets/{asset['id']}"})
+    require(len({a["name"] for a in result}) == len(result), "Duplicate CI release artifact")
+    return result
+
+
 def verified_run(github, repository, run_id, workflow, ref, sha, required_jobs=()):
-    require(REPO.fullmatch(repository) and positive(run_id) and SHA.fullmatch(sha), "Invalid source identity")
+    run_id = source_id(run_id)
+    request_id = REQUEST.fullmatch(run_id)[1] if isinstance(run_id, str) else None
+    require(REPO.fullmatch(repository) and SHA.fullmatch(sha), "Invalid source identity")
     require(re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", workflow), "Invalid workflow path")
     require(ref.startswith("refs/heads/") and len(ref) > 11, "Expected an explicit source branch")
     metadata = github.api(f"repos/{repository}")
-    run = github.api(f"repos/{repository}/actions/runs/{run_id}")
-    expected = {"id": run_id, "head_sha": sha, "head_branch": ref.split("/", 2)[2],
-                "path": workflow, "status": "completed"}
-    require(all(run.get(key) == value for key, value in expected.items()), "Source run identity/status mismatch")
-    require(run.get("repository", {}).get("id") == metadata["id"] and
-            run.get("head_repository", {}).get("id") == metadata["id"], "Source repository identity changed")
-    require(run.get("event") in ("push", "workflow_dispatch"), "Unsupported source event")
-    require(positive(run.get("run_attempt")) and positive(metadata["id"]), "Missing source run attempt or repository ID")
-    source = {"repository": repository, "repository_id": metadata["id"], "run_id": run_id,
-              "run_attempt": run["run_attempt"], "sha": sha, "ref": ref, "event": run["event"],
-              "workflow_path": workflow}
+    if request_id:
+        commit = github.api(f"repos/{repository}/git/commits/{sha}")
+        require(commit.get("sha") == sha, "Requested commit is absent from the primary repository")
+        source = {"repository": repository, "repository_id": metadata["id"], "run_id": None,
+                  "run_attempt": 1, "request_id": request_id, "kind": "dispatch_request",
+                  "sha": sha, "ref": ref, "event": "workflow_dispatch", "workflow_path": workflow}
+        conclusion = "dispatch_rejected"
+    else:
+        run = github.api(f"repos/{repository}/actions/runs/{run_id}")
+        expected = {"id": run_id, "head_sha": sha, "head_branch": ref.split("/", 2)[2],
+                    "path": workflow, "status": "completed"}
+        require(all(run.get(key) == value for key, value in expected.items()), "Source run identity/status mismatch")
+        require(run.get("repository", {}).get("id") == metadata["id"] and
+                run.get("head_repository", {}).get("id") == metadata["id"], "Source repository identity changed")
+        require(run.get("event") in ("push", "workflow_dispatch"), "Unsupported source event")
+        require(positive(run.get("run_attempt")) and positive(metadata["id"]), "Missing source run attempt or repository ID")
+        source = {"repository": repository, "repository_id": metadata["id"], "run_id": run_id,
+                  "run_attempt": run["run_attempt"], "sha": sha, "ref": ref, "event": run["event"],
+                  "workflow_path": workflow}
+        conclusion = run["conclusion"]
     route = "primary"
     receipt_digest = None
     inputs_digest = None
-    if run.get("conclusion") == "success":
+    if not request_id and run.get("conclusion") == "success":
         jobs = github.pages(f"repos/{repository}/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs", "jobs")
         # Sub2API has no intentional skipped job on these two workflows.
         check_jobs(jobs, required_jobs)
@@ -186,8 +266,12 @@ def verified_run(github, repository, run_id, workflow, ref, sha, required_jobs=(
         artifacts = github.pages(f"repos/{repository}/actions/runs/{run_id}/artifacts", "artifacts")
         artifacts = [{**item, "download_path": f"repos/{repository}/actions/artifacts/{item['id']}/zip"}
                      for item in artifacts]
+        artifacts += release_artifacts(github, repository, run, optional=True)
+        require(len({item["name"] for item in artifacts}) == len(artifacts),
+                "Artifact name exists in both Actions and Release storage")
     else:
-        require(billing_blocked(github, repository, run), "Primary failure is not a pure billing rejection")
+        if not request_id:
+            require(billing_blocked(github, repository, run), "Primary failure is not a pure billing rejection")
         route = "backup"
         matches = [item for item in github.pages(f"repos/{repository}/releases")
                    if item.get("tag_name") == f"ci-fallback-{run_id}"]
@@ -204,20 +288,35 @@ def verified_run(github, repository, run_id, workflow, ref, sha, required_jobs=(
                                receipt_asset.get("digest"), receipt_asset.get("size"))
         receipt_digest = digest(raw)
         receipt = document(raw)
-        require(receipt.get("schema_version") == 1 and receipt.get("kind") == "ci-fallback-receipt",
+        require(receipt.get("schema_version") in ((2, 3) if request_id else (1,)) and receipt.get("kind") == "ci-fallback-receipt",
                 "Unsupported standby receipt")
         recorded = receipt["source"]
+        if request_id and receipt.get('schema_version') == 3:
+            require(recorded.get('kind') == 'routed_request' and recorded.get('event') in ('push', 'workflow_dispatch'),
+                    'Unsupported routed deployment event')
+            source.update(kind='routed_request', event=recorded['event'])
+            conclusion = 'billing_cycle_skipped'
         require(all(recorded.get(key) == value for key, value in source.items()), "Standby receipt source mismatch")
+        if request_id:
+            if receipt.get('schema_version') == 3:
+                authorization = recorded.get('authorization')
+                require(valid_authorization(authorization) and authorization['account_id'] == metadata['owner']['id'],
+                        'Invalid routed request authorization')
+            else:
+                require(valid_rejection(recorded.get("rejection")), "Unverified pre-dispatch rejection")
         inputs_digest = recorded.get("dispatch_inputs_sha256")
+        require(not request_id or isinstance(inputs_digest, str), "Missing recorded dispatch input digest")
         require(inputs_digest is None or (isinstance(inputs_digest, str) and
                 re.fullmatch(r"[0-9a-f]{64}", inputs_digest)), "Invalid dispatch input digest")
         builder = receipt["builder"]
         require(REPO.fullmatch(builder.get("repository", "")) and builder["repository"] != repository and
                 positive(builder.get("repository_id")) and builder["repository_id"] != metadata["id"] and
                 positive(builder.get("run_id")) and positive(builder.get("run_attempt")), "Invalid standby builder identity")
+        expected_ref = (f"refs/heads/ci-fallback/{run_id}" if request_id else
+                        f"refs/heads/ci-fallback/run-{run_id}-attempt-{run['run_attempt']}")
         require(builder.get("sha") == sha and builder.get("workflow_path") == workflow and
                 builder.get("event") == "workflow_dispatch" and builder.get("ref") ==
-                f"refs/heads/ci-fallback/run-{run_id}-attempt-{run['run_attempt']}", "Standby builder revision/ref mismatch")
+                expected_ref, "Standby builder revision/ref mismatch")
         require(f"Verified standby run: {builder['repository']}#{builder['run_id']}" in release.get("body", ""),
                 "Preserved release does not identify this builder")
         check_jobs(receipt["verified_jobs"], required_jobs, receipt.get("allowed_skipped_jobs", []))
@@ -234,7 +333,7 @@ def verified_run(github, repository, run_id, workflow, ref, sha, required_jobs=(
         artifacts = [{**item, "download_path": f"repos/{repository}/releases/assets/" +
                       str(next(asset['id'] for asset in assets if asset['name'] == item['filename']))}
                      for item in preserved]
-    return {"route": route, "source": {**source, "conclusion": run["conclusion"]}, "builder": builder,
+    return {"route": route, "source": {**source, "conclusion": conclusion}, "builder": builder,
             "artifacts": artifacts, "receipt_digest": receipt_digest, "dispatch_inputs_sha256": inputs_digest}
 
 
@@ -259,7 +358,7 @@ def read_artifact(github, repository, run_id, workflow, ref, sha, artifact, file
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--run-id", required=True, type=int)
+    parser.add_argument("--run-id", required=True, type=source_id)
     parser.add_argument("--workflow", required=True)
     parser.add_argument("--ref", required=True)
     parser.add_argument("--sha", required=True)

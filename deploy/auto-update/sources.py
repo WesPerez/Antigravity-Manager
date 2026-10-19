@@ -8,6 +8,9 @@ from common import Deferred, Rejected, PROJECT, SHA, DIGEST, digest, run
 import ci_evidence as evidence
 
 
+import ci_router
+
+
 class GitHub(evidence.GitHub):
     def file(self, item, destination, *, limit=4 * 1024**2):
         expected = item.get('digest', '')
@@ -63,10 +66,24 @@ class Source:
         self.git('fetch', '--quiet', '--no-tags', 'origin', '+' + ref + ':' + ref)
         return self.git('rev-parse', ref)
 
+    def routed_candidate(self, sha):
+        try:
+            return ci_router.candidate(self.repo, self.app['workflow'],
+                                       'refs/heads/' + PROJECT.get('branch', 'main'), sha)
+        except RuntimeError as error:
+            raise Deferred(str(error)) from None
+
     def candidate(self, current):
         if not SHA.fullmatch(current or ''):
             raise Rejected('Running revision must be a complete Git SHA')
         head = self.sync()
+        routed = self.routed_candidate(head)
+        if routed:
+            if head == current:
+                return None
+            if routed.get('status') != 'completed':
+                raise Deferred('CI router is building or preserving this revision')
+            return routed
         if head == current:
             return None
         workflow = self.app['workflow'].split('/')[-1]
@@ -85,6 +102,13 @@ class Source:
         return chosen
 
     def verified(self, candidate):
+        if candidate.get('router_request'):
+            try:
+                return ci_router.verified(self.repo, self.app['workflow'],
+                    'refs/heads/' + PROJECT.get('branch', 'main'), candidate['head_sha'],
+                    candidate['router_request'], self.app.get('required_jobs', PROJECT.get('required_jobs', [])))
+            except RuntimeError as error:
+                raise Deferred(str(error)) from None
         try:
             return evidence.verified_run(self.github, self.repo, candidate['id'], self.app['workflow'],
                                          'refs/heads/' + PROJECT['branch'], candidate['head_sha'],
