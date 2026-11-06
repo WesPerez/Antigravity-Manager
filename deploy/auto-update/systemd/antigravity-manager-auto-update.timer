@@ -1,0 +1,13 @@
+# Managed by antigravity-manager/auto-update
+[Unit]
+Description=Check antigravity-manager releases every two minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=2min
+RandomizedDelaySec=15s
+AccuracySec=10s
+Unit=antigravity-manager-auto-update.service
+
+[Install]
+WantedBy=timers.target

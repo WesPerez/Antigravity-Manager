@@ -1,0 +1,113 @@
+name: MINE Container
+
+on:
+  push:
+    branches:
+      - MINE
+  workflow_dispatch:
+
+env:
+  CI_FALLBACK_CONTRACT: '1'
+  IMAGE_NAME: ghcr.io/wesperez/antigravity-manager
+
+concurrency:
+  group: mine-container-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out MINE
+        uses: actions/checkout@v4
+
+      - name: Check hosted smoke environment before building
+        run: |
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,IMAGE_NAME,IMAGE_DIGEST /usr/bin/python3 -B - <<'PY'
+          import os
+          assert os.geteuid() == 0
+          assert os.environ.get('GITHUB_ACTIONS') == 'true'
+          assert os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+          assert all(os.environ.get(key) for key in ('GITHUB_SHA', 'GITHUB_RUN_ID', 'IMAGE_NAME'))
+          PY
+
+      - name: Test independent updater
+        run: python3 -B -m unittest discover -s deploy/auto-update/tests -p 'test_*.py' -v
+
+      - name: Package independent updater
+        run: python3 -B deploy/auto-update/package.py --output "$RUNNER_TEMP/auto-update.tar.gz"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ vars.CI_PRIMARY_OWNER || github.repository_owner }}
+          password: ${{ secrets.CI_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            USE_MIRROR=false
+          tags: |
+            ${{ env.IMAGE_NAME }}:mine-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ vars.CI_PRIMARY_REPOSITORY || github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref.name=MINE
+          cache-from: type=gha,scope=antigravity-manager-mine
+          cache-to: type=gha,mode=max,scope=antigravity-manager-mine
+
+      - name: Verify published image, replacement and rollback
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          docker pull "$IMAGE_NAME@$IMAGE_DIGEST"
+          # The container writes root-owned recovery inputs into its bind mount.
+          # sudo-rs does not support -E; retain only the smoke test's six inputs.
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,IMAGE_NAME,IMAGE_DIGEST /usr/bin/python3 -B deploy/auto-update/ci_smoke.py
+
+      - name: Record published image
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_REPOSITORY: ${{ vars.CI_PRIMARY_REPOSITORY || github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          digest = os.environ['IMAGE_DIGEST']
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+          with open('image-metadata.json', 'w') as output:
+              json.dump({'repository': os.environ['SOURCE_REPOSITORY'], 'revision': os.environ['GITHUB_SHA'], 'image': os.environ['IMAGE_NAME'], 'digest': digest}, output)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-metadata
+          path: image-metadata.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auto-update
+          path: ${{ runner.temp }}/auto-update.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish accepted MINE alias
+        if: (vars.CI_SOURCE_REF || github.ref) == 'refs/heads/MINE'
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: docker buildx imagetools create --tag "$IMAGE_NAME:mine" "$IMAGE_NAME@$IMAGE_DIGEST"
