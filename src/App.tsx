@@ -27,6 +27,7 @@ import { AdminAuthGuard } from './components/common/AdminAuthGuard';
 import { showToast } from './components/common/ToastContainer';
 import MiniView from './components/layout/MiniView';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getWebBasename } from './utils/webBasePath';
 
 // 官方 Hub 更新提示每进程只飘一次（避免 React StrictMode 双挂载重复弹）
 let hubUpdateNoticeShown = false;
@@ -83,7 +84,7 @@ const router = createBrowserRouter([
       },
     ],
   },
-]);
+], { basename: getWebBasename() });
 
 function App() {
   const { config, loadConfig } = useConfigStore();
