@@ -2732,6 +2732,53 @@ mod thinking_sqlite_tests {
     use crate::proxy::monitor::prompt_log_tests::TestDataDir;
 
     #[test]
+    fn test_thinking_schema_upgrades_existing_rows() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE thinking_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                thought TEXT NOT NULL, signature TEXT,
+                tool_ids TEXT NOT NULL, tool_names TEXT NOT NULL,
+                visible TEXT NOT NULL, created_at INTEGER NOT NULL,
+                last_accessed INTEGER, primary_tool_id TEXT, causal_tool_id TEXT
+            );
+            INSERT INTO thinking_records VALUES
+                (7, 'session', 'fp', 'old thought', 'sig', '[]', '[]',
+                 'answer', 100, 101, 'primary', 'causal');",
+        )
+        .unwrap();
+        init_thinking_schema(&db).unwrap();
+        let record = || {
+            db.query_row(
+                "SELECT thought, signature, primary_tool_id, causal_tool_id, context_anchor
+                 FROM thinking_records WHERE id = 7",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        let (thought, signature, primary, causal, anchor) = record();
+        assert_eq!(thought, "old thought");
+        assert_eq!(signature, "sig");
+        assert_eq!(primary, "primary");
+        assert_eq!(causal, "causal");
+        assert_eq!(anchor, None);
+        db.execute("UPDATE thinking_records SET context_anchor = 'new' WHERE id = 7", [])
+            .unwrap();
+        init_thinking_schema(&db).unwrap();
+        assert_eq!(record().4.as_deref(), Some("new"));
+    }
+
+    #[test]
     fn test_thinking_record_deduplication_and_penetration_lookup() {
         let _dir = TestDataDir::new();
 
