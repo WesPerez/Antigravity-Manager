@@ -2,6 +2,7 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import { cn } from '../../utils/cn';
+import { webUrl } from '../../utils/webBasePath';
 
 export interface PreviewModelEntry {
     _uid: string;
@@ -46,7 +47,7 @@ export function SortableModelItem({ entry, collapsed, onToggle, onRemove }: {
                     {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                 </button>
                 <span className="text-xs font-medium text-gray-800 dark:text-gray-200 flex-1 truncate">{entry.displayName}</span>
-                {entry.isAg && <img src="/icon.png" alt="AG" className="w-4 h-4 rounded shrink-0" />}
+                {entry.isAg && <img src={webUrl('/icon.png')} alt="AG" className="w-4 h-4 rounded shrink-0" />}
                 <span className="text-[9px] font-mono text-gray-400 shrink-0 hidden sm:block">{entry.provider}</span>
                 {onRemove && (
                     <button onClick={onRemove} className="p-0.5 text-gray-300 hover:text-red-500 transition-colors" title="Remove">
